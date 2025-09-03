@@ -1,0 +1,25 @@
+[project]
+name = "ai-math-tutor"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "swhh",email = "seamus.holland1@gmail.com"}
+]
+readme = "README.md"
+requires-python = ">=3.9, <4.0"
+dependencies = [
+    "pymupdf (>=1.26.4,<2.0.0)",
+    "ftfy (>=6.3.1,<7.0.0)",
+    "google-genai (>=1.32.0,<2.0.0)",
+    "asyncio (>=4.0.0,<5.0.0)",
+    "tenacity (>=9.1.2,<10.0.0)"
+]
+
+[tool.poetry]
+packages = [{include = "ai_math_tutor", from = "src"}]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+

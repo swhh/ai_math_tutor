@@ -1,0 +1,4 @@
+data/*.json
+*.pdf
+chroma_db/
+poetry.lock
