@@ -1,0 +1,219 @@
+import sqlite3
+from typing import List, TypedDict
+
+from dotenv import load_dotenv
+from langchain.chat_models import init_chat_model
+from langchain.prompts import ChatPromptTemplate
+from langchain_chroma import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain.prompts import ChatPromptTemplate
+from langchain.schema.output_parser import StrOutputParser
+from langchain.schema.document import Document
+from langchain.schema import BaseMessage, HumanMessage, AIMessage
+from langgraph.graph import StateGraph, END
+
+from chunk_and_embed import CHROMA_DB_PATH, DEVICE, EMBEDDING_MODEL_NAME, SQLITE_DB_PATH
+from utils import format_docs
+
+GENERATION_LLM = "gemini-2.5-flash"
+GRADING_LLM = "gemini-1.5-flash" # use a smaller, weaker model for grading
+DEFAULT_DOC_NUM = 12
+SAMPLE_BOOK = 'calculus_textbook.json'
+CONVERSATION_LIMIT = 10
+
+GENERATE_PROMPT_TEMPLATE = """
+        You are an expert mathematics tutor. Your goal is to help a user understand the textbook {collection_name}.
+
+        Here is the recent conversation history:
+        ---
+        CHAT_HISTORY:
+        {chat_history}
+        ---
+
+        The user is currently looking at the following content on page {current_page_num}:
+        ---
+        CURRENT_PAGE_CONTENT:
+        {current_page_content}
+        ---
+
+        Here is some related background context from other pages in the book:
+        ---
+        BACKGROUND_CONTEXT:
+        {background_context}
+        ---
+
+        Based on all of the above, answer the user's latest question. If the question is a follow-up to the conversation, use the chat history to understand the context. Focus your answer on the CURRENT_PAGE_CONTENT and the user's immediate question.
+
+        LATEST QUESTION: {question}
+        ANSWER:
+        """
+
+
+class State(TypedDict):
+    question: str
+    current_page_num: int
+    collection_name: str
+    documents: List[Document]
+    generation: str
+    current_page_content: str
+    chat_history: List[BaseMessage]
+
+
+class RagApplication:
+
+    def __init__(self, collection_name, content_db_path) -> None:
+        self.collection_name = collection_name
+        self.book_id = collection_name
+
+        self.generate_llm = init_chat_model(GENERATION_LLM, model_provider="google_genai", temperature=0)
+        
+        self.content_db_conn = sqlite3.connect(content_db_path, check_same_thread=False)
+
+        embedding_model = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL_NAME, model_kwargs={'device': DEVICE})
+
+        self.vector_store = Chroma(
+            persist_directory=CHROMA_DB_PATH,
+            embedding_function=embedding_model,
+            collection_name=self.collection_name
+        )
+
+    def _format_chat_history(self, chat_history: List[BaseMessage]) -> str:
+        """Formats the chat history into a readable string for the prompt."""
+        if not chat_history:
+            return "No previous conversation history."
+        return "\n".join(
+            f"{'User' if isinstance(msg, HumanMessage) else 'Tutor'}: {msg.content}"
+            for msg in chat_history
+        )
+
+    def fetch_page(self, state: State):
+        """Fetches the clean content for the current book and page from SQLite."""
+        current_page_num = state["current_page_num"]
+        cursor = self.content_db_conn.cursor()
+        
+        cursor.execute(
+            "SELECT content FROM pages WHERE book_id = ? AND page_number = ?",
+            (self.book_id, current_page_num)
+        )
+        result = cursor.fetchone()
+        
+        content = result[0] if result else "No content found for this page."
+        return {"current_page_content": content}
+    
+
+    def retrieve(self, state: State):
+        """Fetch relevant docs from vector db"""
+        question = state["question"]
+        current_page = state["current_page_num"]
+        
+        retriever = self.vector_store.as_retriever(
+            search_kwargs={'k': DEFAULT_DOC_NUM, 
+                           'filter': {'page_number': {'$lte': current_page}}}
+        )
+        
+        documents = retriever.invoke(question)
+        return {"documents": documents, "question": question, "current_page_num": current_page}
+
+    def generate(self, state: State):
+        """Generate LLM response to user query"""
+        question = state["question"]
+        current_page_content = state["current_page_content"]
+        documents = state["documents"]
+        current_page_num = state["current_page_num"]
+        collection_name = state["collection_name"]
+        chat_history = state['chat_history']
+
+        prompt = ChatPromptTemplate.from_template(GENERATE_PROMPT_TEMPLATE)
+
+        background_context = format_docs(documents)
+
+        rag_chain = prompt | self.generate_llm | StrOutputParser
+
+        generation = rag_chain.invoke({
+            "current_page_content": current_page_content,
+            "background_context": background_context,
+            "question": question,
+            "current_page_num": current_page_num,
+            "collection_name": collection_name,
+            "chat_history": self._format_chat_history(chat_history)
+        })
+        return {"generation": generation}
+
+
+
+def generate_workflow(rag_app: RagApplication) -> StateGraph:
+    """Generate workflow to be compiled"""
+    workflow = StateGraph(State)
+
+    workflow.add_node('fetch_page', rag_app.fetch_page)
+    workflow.add_node('retrieve', rag_app.retrieve)
+    workflow.add_node('generate', rag_app.generate)
+
+    workflow.set_entry_point('fetch_page')
+    workflow.add_edge('fetch_page', 'generate')
+
+    workflow.set_entry_point('retrieve')
+    workflow.add_edge('retrieve', 'generate')
+    workflow.add_edge('generate', END)
+
+    return workflow
+
+
+
+def main():
+
+    load_dotenv()
+    collection_name = SAMPLE_BOOK
+
+    rag_app = RagApplication(collection_name=collection_name, content_db_path=SQLITE_DB_PATH)
+    workflow = generate_workflow(rag_app)
+    app = workflow.compile()
+
+    chat_history = []
+
+    print(f"\n--- Studying '{collection_name}'. Type 'exit' or 'quit' to end. Type '/new' to start a new conversation ---")
+
+    while True:
+            try:
+                user_question = input(f"\nAsk a question about {collection_name}: ")
+                if user_question.lower() in ["exit", "quit"]:
+                    break
+                
+                if user_question.lower() == "/new" or len(chat_history) == 10:
+                    chat_history = []
+                    print("--- New conversation started. ---")
+                    continue
+
+                current_page = int(input("What page are you on? "))
+                if current_page <= 0:
+                    raise ValueError
+
+                inputs = {
+                    "question": user_question,
+                    "current_page": current_page,
+                    "collection_name": collection_name,
+                    "chat_history": chat_history # Pass the current history
+                }
+                
+                for output in app.stream(inputs, {"recursion_limit": 5}):
+                    for key, value in output.items():
+                        print(f"Finished node '{key}':")
+                
+                final_generation = value['generation']
+                print("\nAI Tutor:")
+                print(final_generation)
+
+                chat_history.append(HumanMessage(content=user_question))
+                chat_history.append(AIMessage(content=final_generation))
+
+            except (ValueError, TypeError):
+                print("Invalid page number...")
+            except Exception as e:
+                print(f"\nAn error occurred: {e}")
+
+
+if __name__ == '__main__':
+    main()
+
+
+    
