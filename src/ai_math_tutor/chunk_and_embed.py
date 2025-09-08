@@ -11,20 +11,20 @@ from langchain_chroma import Chroma
 import torch
 from typing import List
 
-from extract_content_from_pdf import GRANDPARENT_DIR_PATH, OUTPUT_FILE_PATH
-from utils import get_filename_without_extension
+from ai_math_tutor.extract_content_from_pdf import GRANDPARENT_DIR_PATH, OUTPUT_FILE_PATH
+from ai_math_tutor.utils import get_filename_without_extension
 
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 150
 
-SAMPLE_BOOK = 'calculus_textbook'
+SAMPLE_BOOK = 'calculus_textbook.json'
 
 CHROMA_DB_PATH = os.path.join(GRANDPARENT_DIR_PATH, "data", "chroma_db")
 EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
 SQLITE_DB_PATH = os.path.join(GRANDPARENT_DIR_PATH, "data", "book_content.db")
 
-DEVICE = "cpu"
+DEVICE = 'cuda' if torch.cuda.is_available() else "cpu"
 
 
 def create_or_update_content_database(documents: List[Document], book_id: str):
@@ -75,9 +75,8 @@ def chunk_documents(documents: List[Document]) -> List[Document]:
     chunks = markdown_splitter.split_documents(documents)
     return chunks
     
-def ingestion_pipeline(json_path):
+def chunk_and_embed_pipeline(documents, collection_name):
 
-    documents = load_documents_from_json(json_path)
     chunks = chunk_documents(documents)
 
     model_kwargs = {'device': DEVICE}
@@ -92,7 +91,7 @@ def ingestion_pipeline(json_path):
         documents=chunks,
         embedding=hf_embedding,
         persist_directory=CHROMA_DB_PATH,
-        collection_name=get_filename_without_extension(json_path)
+        collection_name=collection_name
     )
     return vector_store
 
@@ -103,8 +102,8 @@ if __name__ == '__main__':
     with sqlite3.connect(SQLITE_DB_PATH, check_same_thread=False) as conn:
         cursor = conn.cursor()
         results = cursor.execute("SELECT * FROM pages LIMIT 1")
-        print(results.fetchone())
-    vector_store = ingestion_pipeline(OUTPUT_FILE_PATH)
+
+    vector_store = chunk_and_embed_pipeline(documents)
     client = vector_store._client
     print(client.list_collections())
 

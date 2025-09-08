@@ -9,7 +9,7 @@ from google import genai
 from google.genai import types
 from google.genai.errors import ServerError
 import pymupdf
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_random_exponential
+from tenacity import retry, RetryError, retry_if_exception_type, stop_after_attempt, wait_random_exponential
 
 
 MODEL_ID = 'gemini-2.5-flash'
@@ -28,10 +28,12 @@ GRANDPARENT_DIR_PATH = os.path.abspath(os.path.join(os.getcwd() ,"../.."))
 PDF_PATH = os.path.join(GRANDPARENT_DIR_PATH,"data", "calculus_textbook.pdf")
 OUTPUT_FILE_PATH = os.path.join(GRANDPARENT_DIR_PATH, "data", "calculus_textbook.json")
 
+MISSING_PAGE_PLACEHOLDER = "--- CONTENT MISSING: This page could not be processed due to a persistent error. ---"
+
 def _client():
-    if not GEMINI_API_KEY:
+    if not GOOGLE_API_KEY:
         raise ValueError("Please set your GEMINI_API_KEY")
-    return genai.Client(api_key=GEMINI_API_KEY)
+    return genai.Client(api_key=GOOGLE_API_KEY)
 
 @retry(
     stop=stop_after_attempt(5),
@@ -52,9 +54,9 @@ async def async_call_llm(page: pymupdf.Page, page_num: int, client: genai.Client
             types.Part(text=GEMINI_PROMPT),
         ]
         ),
-    )
+    )   
     return {'page_content': response.text, 'page_num': page_num}
-
+        
 async def extract_content(pdf_path: str, concurrent_requests: int=10) -> List[Dict[str, Any]]:
     
     filepath = pathlib.Path(pdf_path)
@@ -67,7 +69,14 @@ async def extract_content(pdf_path: str, concurrent_requests: int=10) -> List[Di
     
     async def async_extract_page_content(page, i, client):
         async with semaphore:
-            return await async_call_llm(page, i, client) 
+            try:
+                return await async_call_llm(page, i, client)
+            except RetryError:
+                return {
+                    "page_number": i,
+                    "content": MISSING_PAGE_PLACEHOLDER,
+                    "error": "Persistent API failure after all retries."
+                }
 
     with pymupdf.open(pdf_path) as pdf_document:
         tasks = [async_extract_page_content(page, i, client) for i, page in enumerate(pdf_document) if i > 20 and i < 25]
@@ -83,9 +92,9 @@ def store_pages_in_json(results, output_file_path):
     
 if __name__ == '__main__':
     load_dotenv()
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-    if not GEMINI_API_KEY:
-        raise ValueError('Please set your GEMINI_API_KEY')
+    GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+    if not GOOGLE_API_KEY:
+        raise ValueError('Please set your GOOGLE_API_KEY')
 
     results = asyncio.run(extract_content(PDF_PATH))
     store_pages_in_json(results, OUTPUT_FILE_PATH)

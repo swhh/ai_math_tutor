@@ -1,4 +1,6 @@
+import asyncio
 import sqlite3
+from sysconfig import get_makefile_filename
 from typing import List, TypedDict
 
 from dotenv import load_dotenv
@@ -12,8 +14,9 @@ from langchain.schema.document import Document
 from langchain.schema import BaseMessage, HumanMessage, AIMessage
 from langgraph.graph import StateGraph, END
 
-from chunk_and_embed import CHROMA_DB_PATH, DEVICE, EMBEDDING_MODEL_NAME, SQLITE_DB_PATH
-from utils import format_docs
+from ai_math_tutor.chunk_and_embed import CHROMA_DB_PATH, create_or_update_content_database, DEVICE, EMBEDDING_MODEL_NAME, load_documents_from_json, chunk_and_embed_pipeline, SQLITE_DB_PATH
+from ai_math_tutor.extract_content_from_pdf import extract_content, MISSING_PAGE_PLACEHOLDER, OUTPUT_FILE_PATH, store_pages_in_json
+from ai_math_tutor.utils import format_docs, get_filename_without_extension
 
 GENERATION_LLM = "gemini-2.5-flash"
 GRADING_LLM = "gemini-1.5-flash" # use a smaller, weaker model for grading
@@ -48,6 +51,17 @@ GENERATE_PROMPT_TEMPLATE = """
         ANSWER:
         """
 
+FAILURE_PROMPT_TEMPLATE = """
+            You are an expert mathematics tutor. You have encountered an issue.
+            Inform the user that you were unable to process the content for their current page (page {current_page_num}) during the initial textbook upload.
+            Politely ask them to copy the text from the page they are viewing and paste it into the chat so you can help them with their question.
+
+            Here is the user's question, which you should refer to:
+            QUESTION: {question}
+            
+            Your response should be a polite request for the page content.
+            """
+
 
 class State(TypedDict):
     question: str
@@ -77,6 +91,8 @@ class RagApplication:
             collection_name=self.collection_name
         )
 
+        self.compiled_workflow = self._generate_workflow()
+
     def _format_chat_history(self, chat_history: List[BaseMessage]) -> str:
         """Formats the chat history into a readable string for the prompt."""
         if not chat_history:
@@ -96,7 +112,7 @@ class RagApplication:
             (self.book_id, current_page_num)
         )
         result = cursor.fetchone()
-        
+    
         content = result[0] if result else "No content found for this page."
         return {"current_page_content": content}
     
@@ -123,51 +139,74 @@ class RagApplication:
         collection_name = state["collection_name"]
         chat_history = state['chat_history']
 
-        prompt = ChatPromptTemplate.from_template(GENERATE_PROMPT_TEMPLATE)
-
-        background_context = format_docs(documents)
-
-        rag_chain = prompt | self.generate_llm | StrOutputParser
-
-        generation = rag_chain.invoke({
+        if MISSING_PAGE_PLACEHOLDER in current_page_content:  # if page markdown generation failed
+            prompt_template = FAILURE_PROMPT_TEMPLATE
+            inputs = {"question": question, 
+                    "current_page_num": current_page_num}
+        else:
+            prompt_template = GENERATE_PROMPT_TEMPLATE
+            background_context = format_docs(documents)
+            inputs = {
             "current_page_content": current_page_content,
             "background_context": background_context,
             "question": question,
             "current_page_num": current_page_num,
             "collection_name": collection_name,
             "chat_history": self._format_chat_history(chat_history)
-        })
+            }
+
+        prompt = ChatPromptTemplate.from_template(prompt_template)
+
+        rag_chain = prompt | self.generate_llm | StrOutputParser()
+
+        generation = rag_chain.invoke(inputs)
         return {"generation": generation}
 
+    def _generate_workflow(self):
+        """Generate workflow to be compiled"""
+        workflow = StateGraph(State)
+
+        workflow.add_node('fetch_page', self.fetch_page)
+        workflow.add_node('retrieve', self.retrieve)
+        workflow.add_node('generate', self.generate)
+
+        workflow.set_entry_point('fetch_page')
+        workflow.add_edge('fetch_page', 'generate')
+
+        workflow.set_entry_point('retrieve')
+        workflow.add_edge('retrieve', 'generate')
+        workflow.add_edge('generate', END)
+
+        return workflow.compile()
+
+    def get_compiled_workflow(self):
+        return self.compiled_workflow
 
 
-def generate_workflow(rag_app: RagApplication) -> StateGraph:
-    """Generate workflow to be compiled"""
-    workflow = StateGraph(State)
+def end_to_end_pipeline(pdf_path):
+    """Generate rag app instance from textbook pdf file path"""
+    book_id = get_filename_without_extension(pdf_path) 
 
-    workflow.add_node('fetch_page', rag_app.fetch_page)
-    workflow.add_node('retrieve', rag_app.retrieve)
-    workflow.add_node('generate', rag_app.generate)
+    results = asyncio.run(extract_content(pdf_path)) # convert pdf pages to markdown
+    output_file_path = store_pages_in_json(results, OUTPUT_FILE_PATH) # store markdown pages in json
+    documents = load_documents_from_json(output_file_path) # convert json data into Langchain docs
+    create_or_update_content_database(documents, book_id) # add pages to sqlite db
+    
+    chunk_and_embed_pipeline(documents, collection_name=book_id) # chunk and embed documents
 
-    workflow.set_entry_point('fetch_page')
-    workflow.add_edge('fetch_page', 'generate')
+    rag_app = RagApplication(collection_name=book_id, content_db_path=SQLITE_DB_PATH) # create rag app instance
 
-    workflow.set_entry_point('retrieve')
-    workflow.add_edge('retrieve', 'generate')
-    workflow.add_edge('generate', END)
-
-    return workflow
-
+    return rag_app
 
 
 def main():
 
     load_dotenv()
+
     collection_name = SAMPLE_BOOK
 
     rag_app = RagApplication(collection_name=collection_name, content_db_path=SQLITE_DB_PATH)
-    workflow = generate_workflow(rag_app)
-    app = workflow.compile()
+    compiled_workflow = rag_app.get_compiled_workflow()
 
     chat_history = []
 
@@ -190,12 +229,12 @@ def main():
 
                 inputs = {
                     "question": user_question,
-                    "current_page": current_page,
+                    "current_page_num": current_page,
                     "collection_name": collection_name,
                     "chat_history": chat_history # Pass the current history
                 }
                 
-                for output in app.stream(inputs, {"recursion_limit": 5}):
+                for output in compiled_workflow.stream(inputs, {"recursion_limit": 5}):
                     for key, value in output.items():
                         print(f"Finished node '{key}':")
                 

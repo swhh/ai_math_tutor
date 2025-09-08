@@ -3,3 +3,4 @@ data/*.json
 chroma_db/
 poetry.lock
 .env
+__pycache__/
