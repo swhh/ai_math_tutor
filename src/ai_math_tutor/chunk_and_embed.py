@@ -11,18 +11,17 @@ from langchain_chroma import Chroma
 import torch
 from typing import List
 
-from ai_math_tutor.extract_content_from_pdf import GRANDPARENT_DIR_PATH, OUTPUT_FILE_PATH
-from ai_math_tutor.utils import get_filename_without_extension
+from ai_math_tutor.extract_content_from_pdf import PROJECT_ROOT, OUTPUT_FILE_PATH
 
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 150
 
 SAMPLE_BOOK = 'calculus_textbook.json'
 
-CHROMA_DB_PATH = os.path.join(GRANDPARENT_DIR_PATH, "data", "chroma_db")
+CHROMA_DB_PATH = os.path.join(PROJECT_ROOT, "chroma_db")
 EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
-SQLITE_DB_PATH = os.path.join(GRANDPARENT_DIR_PATH, "data", "book_content.db")
+SQLITE_DB_PATH = os.path.join(PROJECT_ROOT, "data", "book_content.db")
 
 DEVICE = 'cuda' if torch.cuda.is_available() else "cpu"
 
@@ -102,6 +101,7 @@ if __name__ == '__main__':
     with sqlite3.connect(SQLITE_DB_PATH, check_same_thread=False) as conn:
         cursor = conn.cursor()
         results = cursor.execute("SELECT * FROM pages LIMIT 1")
+        print(results)
 
     vector_store = chunk_and_embed_pipeline(documents)
     client = vector_store._client

@@ -8,8 +8,9 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from google.genai.errors import ServerError
+from langgraph.pregel.main import tasks_w_writes
 import pymupdf
-from tenacity import retry, RetryError, retry_if_exception_type, stop_after_attempt, wait_random_exponential
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_random_exponential
 
 
 MODEL_ID = 'gemini-2.5-flash'
@@ -24,11 +25,11 @@ Instructions:
 4.  If the page contains graphs, charts, or complex diagrams, provide a detailed, descriptive summary of the visual element within a Markdown blockquote. Example: `> A scatter plot showing a positive correlation...`
 5.  Keep the output clean and focused on the content. Do not add any conversational text.
 """
-GRANDPARENT_DIR_PATH = os.path.abspath(os.path.join(os.getcwd() ,"../.."))
-PDF_PATH = os.path.join(GRANDPARENT_DIR_PATH,"data", "calculus_textbook.pdf")
-OUTPUT_FILE_PATH = os.path.join(GRANDPARENT_DIR_PATH, "data", "calculus_textbook.json")
+PROJECT_ROOT = os.path.abspath(os.path.join(os.getcwd() ,"../.."))
+PDF_PATH = os.path.join(PROJECT_ROOT,"data", "math55a.pdf")
+OUTPUT_FILE_PATH = os.path.join(PROJECT_ROOT, "data", "math55a.json")
 
-MISSING_PAGE_PLACEHOLDER = "--- CONTENT MISSING: This page could not be processed due to a persistent error. ---"
+MISSING_PAGE_PLACEHOLDER = "--- CONTENT MISSING: This page could not be processed owing to a persistent error. ---"
 
 def _client():
     if not GOOGLE_API_KEY:
@@ -71,17 +72,17 @@ async def extract_content(pdf_path: str, concurrent_requests: int=10) -> List[Di
         async with semaphore:
             try:
                 return await async_call_llm(page, i, client)
-            except RetryError:
+            except Exception as e:
                 return {
-                    "page_number": i,
-                    "content": MISSING_PAGE_PLACEHOLDER,
-                    "error": "Persistent API failure after all retries."
+                    "page_num": i,
+                    "page_content": MISSING_PAGE_PLACEHOLDER,
+                    "error": f"Error processing page {i}: {e}"
                 }
 
     with pymupdf.open(pdf_path) as pdf_document:
-        tasks = [async_extract_page_content(page, i, client) for i, page in enumerate(pdf_document) if i > 20 and i < 25]
+        tasks = [async_extract_page_content(page, i, client) for i, page in enumerate(pdf_document)]
         results = await asyncio.gather(*tasks)
-        return sorted(results, key=lambda x: x['page_num'])
+    return results                
     
 
 def store_pages_in_json(results, output_file_path):

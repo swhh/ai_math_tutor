@@ -1,6 +1,5 @@
 import asyncio
 import sqlite3
-from sysconfig import get_makefile_filename
 from typing import List, TypedDict
 
 from dotenv import load_dotenv
@@ -19,7 +18,7 @@ from ai_math_tutor.extract_content_from_pdf import extract_content, MISSING_PAGE
 from ai_math_tutor.utils import format_docs, get_filename_without_extension
 
 GENERATION_LLM = "gemini-2.5-flash"
-GRADING_LLM = "gemini-1.5-flash" # use a smaller, weaker model for grading
+QUERY_ANALYSIS_LLM = "gemini-1.5-flash" # use a smaller, weaker model for grading
 DEFAULT_DOC_NUM = 12
 SAMPLE_BOOK = 'calculus_textbook.json'
 CONVERSATION_LIMIT = 10
@@ -46,6 +45,7 @@ GENERATE_PROMPT_TEMPLATE = """
         ---
 
         Based on all of the above, answer the user's latest question. If the question is a follow-up to the conversation, use the chat history to understand the context. Focus your answer on the CURRENT_PAGE_CONTENT and the user's immediate question.
+        Keep answers brief at all times and reference page numbers where you used information from the background context to formulate your response.
 
         LATEST QUESTION: {question}
         ANSWER:
@@ -53,7 +53,7 @@ GENERATE_PROMPT_TEMPLATE = """
 
 FAILURE_PROMPT_TEMPLATE = """
             You are an expert mathematics tutor. You have encountered an issue.
-            Inform the user that you were unable to process the content for their current page (page {current_page_num}) during the initial textbook upload.
+            Inform the user that you were unable to process the content for the current page (page {current_page_num}) during the initial textbook upload.
             Politely ask them to copy the text from the page they are viewing and paste it into the chat so you can help them with their question.
 
             Here is the user's question, which you should refer to:
@@ -218,7 +218,7 @@ def main():
                 if user_question.lower() in ["exit", "quit"]:
                     break
                 
-                if user_question.lower() == "/new" or len(chat_history) == 10:
+                if user_question.lower() == "/new" or len(chat_history) == CONVERSATION_LIMIT:
                     chat_history = []
                     print("--- New conversation started. ---")
                     continue
@@ -231,7 +231,7 @@ def main():
                     "question": user_question,
                     "current_page_num": current_page,
                     "collection_name": collection_name,
-                    "chat_history": chat_history # Pass the current history
+                    "chat_history": chat_history 
                 }
                 
                 for output in compiled_workflow.stream(inputs, {"recursion_limit": 5}):
@@ -239,8 +239,7 @@ def main():
                         print(f"Finished node '{key}':")
                 
                 final_generation = value['generation']
-                print("\nAI Tutor:")
-                print(final_generation)
+                print("\nAI Tutor:", final_generation)
 
                 chat_history.append(HumanMessage(content=user_question))
                 chat_history.append(AIMessage(content=final_generation))
