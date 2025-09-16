@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import sqlite3
 from typing import List, Optional, TypedDict
 
@@ -30,15 +31,14 @@ from ai_math_tutor.config import (
 from ai_math_tutor.extract_content_from_pdf import (
     extract_content,
     MISSING_PAGE_PLACEHOLDER,
-    PROJECT_ROOT,
     store_pages_in_json,
 )
 from ai_math_tutor.utils import format_docs, get_filename_without_extension
 
 GENERATION_LLM = "gemini-2.5-flash"
-QUERY_ANALYSIS_LLM = (
-    "gemini-1.5-flash"  # use a smaller, weaker model for query analysis
-)
+QUERY_ANALYSIS_LLM = "gemini-1.5-flash" # use a smaller, weaker model for query analysis
+
+DEFAULT_K_CHUNKS = 8
 
 GENERATE_PROMPT_TEMPLATE = """
         You are an expert mathematics tutor. Your goal is to help a user understand the textbook {collection_name}.
@@ -101,6 +101,12 @@ QUERY_ANALYSIS_TEMPLATE = """You are an expert retrieval strategist for a RAG sy
             ONLY provide page numbers if specific pages are needed to help answer the user query. 
             """
 
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 class State(TypedDict):
     question: str
@@ -139,12 +145,8 @@ class RagApplication:
         self.collection_name = collection_name
         self.book_id = collection_name
 
-        self.generate_llm = init_chat_model(
-            GENERATION_LLM, model_provider="google_genai", temperature=0
-        )
-        self.query_analysis_llm = init_chat_model(
-            QUERY_ANALYSIS_LLM, model_provider="google_genai", temperature=0
-        )
+        self.generate_llm = init_chat_model(GENERATION_LLM, model_provider="google_genai", temperature=0)
+        self.query_analysis_llm = init_chat_model(QUERY_ANALYSIS_LLM, model_provider="google_genai", temperature=0)
 
         self.content_db_conn = sqlite3.connect(content_db_path, check_same_thread=False)
         # Validate the vector store before using it
@@ -153,6 +155,7 @@ class RagApplication:
         if vector_store is not None:
             self.vector_store = vector_store
         else:
+            logger.info(f"Creating new vector store")
             embedding_model = HuggingFaceEmbeddings(
                 model_name=EMBEDDING_MODEL_NAME, model_kwargs={"device": DEVICE}
             )
@@ -183,19 +186,12 @@ class RagApplication:
         try:
             doc_count = vector_store._collection.count()
             if doc_count == 0:
-                print(
-                    f"Warning: Collection '{self.collection_name}' is empty, creating new vector store..."
-                )
+                logger.warning(f"Warning: Collection '{self.collection_name}' is empty, creating new vector store...")
                 vector_store = None  # Force creation of new vector store
             else:
-                print(
-                    f"Collection '{self.collection_name}' validated with {doc_count} documents"
-                )
+                logger.warning(f"Collection '{self.collection_name}' validated with {doc_count} documents")
         except Exception as e:
-            print(
-                f"Warning: Could not validate collection '{self.collection_name}': {e}"
-            )
-            print("Creating new vector store...")
+            logger.warning(f"Warning: Could not validate collection '{self.collection_name}': {e}")
             vector_store = None  # Force creation of new vector store
         return vector_store
 
@@ -219,17 +215,22 @@ class RagApplication:
             wait_exponential_jitter=True,
             stop_after_attempt=3,
         )
+        try:
+            retrieval_plan = chain.invoke(inputs)
+            neighboring_pages = sorted(list(set(retrieval_plan.neighboring_pages) - {current_page_num}))
 
-        retrieval_plan = chain.invoke(inputs)
+            return {
+                "top_k_chunks": retrieval_plan.top_k_chunks,
+                "neighboring_pages": neighboring_pages,
+            }
+        except Exception as e: # if query analyser fails, set sensible defaults
+            logger.error(f"Query analyser failure for {current_page_num} in book {self.book_id}: {e}")
 
-        neighboring_pages = sorted(
-            list(set(retrieval_plan.neighboring_pages) - {current_page_num})
-        )
+            neighboring_pages = [current_page_num - 1] if current_page_num > 1 else []
+            return {"top_k_chunks": DEFAULT_K_CHUNKS,
+                    "neighboring_pages": neighboring_pages}
 
-        return {
-            "top_k_chunks": retrieval_plan.top_k_chunks,
-            "neighboring_pages": neighboring_pages,
-        }
+
 
     def fetch_page(self, state: State):
         """Fetches the clean content for the current book and page from SQLite."""
@@ -313,9 +314,7 @@ class RagApplication:
         chat_history = state["chat_history"]
         neighboring_pages_content = state["neighboring_pages_content"]
 
-        if (
-            MISSING_PAGE_PLACEHOLDER in current_page_content
-        ):  # if page markdown generation failed
+        if MISSING_PAGE_PLACEHOLDER in current_page_content:  # if page markdown generation failed
             prompt_template = FAILURE_PROMPT_TEMPLATE
             inputs = {"question": question, "current_page_num": current_page_num}
         else:
@@ -342,9 +341,20 @@ class RagApplication:
             )
             | StrOutputParser()
         )
+        try:
+            generation = rag_chain.invoke(inputs)
+            return {"generation": generation}
+        except Exception as e:
+            logger.exception(f"Generate failure for page {current_page_num} in {self.book_id}: {e}")
+            if MISSING_PAGE_PLACEHOLDER in current_page_content:
+                fallback = f"""Sorry I could not process page {current_page_num}. 
+                    Please copy the text from the page and ask your question again.
+                    Your question was: {question}"""
+            else:
+                fallback = f"""I'm having trouble generating a response right now. Please try again shortly. 
+                If the issue persists, consider rephrasing your question for page {current_page_num}"""
+            return {"generation": fallback}
 
-        generation = rag_chain.invoke(inputs)
-        return {"generation": generation}
 
     def _generate_workflow(self):
         """Generate workflow to be compiled"""
@@ -386,15 +396,10 @@ def end_to_end_pipeline(pdf_path):
     results = asyncio.run(extract_content(pdf_path))  # convert pdf pages to markdown
     json_output_file_path = str(PROJECT_ROOT / "data" / f"{book_id}.json")
     store_pages_in_json(results, json_output_file_path)  # store markdown pages in json
-    documents = load_documents_from_json(
-        json_output_file_path
-    )  # convert json data into Langchain docs
+    documents = load_documents_from_json(json_output_file_path)  # convert json data into Langchain Documents
     create_or_update_content_database(documents, book_id)  # add pages to sqlite db
 
-    vector_store = chunk_and_embed_pipeline(
-        documents, collection_name=book_id
-    )  # chunk and embed documents
-
+    vector_store = chunk_and_embed_pipeline(documents, collection_name=book_id)  # chunk and embed documents
     rag_app = RagApplication(
         collection_name=book_id,
         content_db_path=SQLITE_DB_PATH,
@@ -419,7 +424,6 @@ def main():
     collection_name = get_filename_without_extension(pdf_path)
 
     rag_app = end_to_end_pipeline(pdf_path)
-    exit()
     compiled_workflow = rag_app.get_compiled_workflow()
 
     chat_history = []

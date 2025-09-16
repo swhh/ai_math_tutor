@@ -1,29 +1,24 @@
 import json
-import os
 import pathlib
 import sqlite3
+from typing import List
 
 from langchain.docstore.document import Document
 from langchain.text_splitter import MarkdownTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 import torch
-from typing import List
+
 
 from ai_math_tutor.config import (
     CHROMA_DB_DIR,
     CHUNK_OVERLAP,
     CHUNK_SIZE,
     EMBEDDING_MODEL_NAME,
-    PROJECT_ROOT,
     SAMPLE_BOOK,
     SAMPLE_OUTPUT_FILE_PATH,
     SQLITE_DB_PATH,
 )
-
-
-CHROMA_DB_DIR = os.path.join(PROJECT_ROOT, "data", "chroma_db")
-
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -120,10 +115,5 @@ if __name__ == "__main__":
     )
 
     documents = load_documents_from_json(SAMPLE_OUTPUT_FILE_PATH)
-    # create_or_update_content_database(documents, book_id = SAMPLE_BOOK)
-    # with sqlite3.connect(SQLITE_DB_PATH, check_same_thread=False) as conn:
-    #     cursor = conn.cursor()
-    #     results = cursor.execute("SELECT * FROM pages LIMIT 1")
-    #     print(results)
     print("collections:", [c.name for c in vs._client.list_collections()])
     print("count:", vs._collection.count())

@@ -30,10 +30,6 @@ Instructions:
 5.  Keep the output clean and focused on the content. Do not add any conversational text.
 """
 
-PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
-PDF_PATH = str(PROJECT_ROOT / "data" / "math55a.pdf")
-OUTPUT_FILE_PATH = str(PROJECT_ROOT / "data" / "math55a.json")
-
 MISSING_PAGE_PLACEHOLDER = "--- CONTENT MISSING: This page could not be processed owing to a persistent error. ---"
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
@@ -79,7 +75,7 @@ async def extract_content(
 
     client = _client()
 
-    semaphore = asyncio.Semaphore(concurrent_requests)
+    semaphore = asyncio.Semaphore(concurrent_requests) # limit the number of concurrent requests to avoid throttling
 
     async def async_extract_page_content(page, i, client):
         async with semaphore:
@@ -108,5 +104,7 @@ def store_pages_in_json(results, output_file_path):
 
 
 if __name__ == "__main__":
-    results = asyncio.run(extract_content(PDF_PATH))
-    store_pages_in_json(results, OUTPUT_FILE_PATH)
+    pdf_path = str(PROJECT_ROOT / "data" / "math55a.pdf")
+    json_output_file_path = str(PROJECT_ROOT / "data" / "math55a.json")
+    results = asyncio.run(extract_content(pdf_path))
+    store_pages_in_json(results, json_output_file_path)
