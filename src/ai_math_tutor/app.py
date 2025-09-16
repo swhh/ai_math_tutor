@@ -63,7 +63,11 @@ with st.sidebar:
                 with open(file_path, "wb") as f:
                     f.write(uploaded_file.getbuffer())
 
-                rag_app = end_to_end_pipeline(file_path)
+                try:
+                    rag_app = end_to_end_pipeline(file_path)
+                except Exception as e: # remember to add code to remove orphaned files
+                    st.error(f"Failed to process textbook: {e}")
+                    st.stop()  # reset state if error
 
                 # Update session state after processing
                 st.session_state.rag_app = rag_app

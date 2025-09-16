@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import sqlite3
 from typing import List, Optional, TypedDict
@@ -21,6 +22,8 @@ from ai_math_tutor.chunk_and_embed import (
     DEVICE,
     load_documents_from_json,
     chunk_and_embed_pipeline,
+    extract_index,
+    store_index
 )
 from ai_math_tutor.config import (
     PROJECT_ROOT,
@@ -33,7 +36,7 @@ from ai_math_tutor.extract_content_from_pdf import (
     MISSING_PAGE_PLACEHOLDER,
     store_pages_in_json,
 )
-from ai_math_tutor.utils import format_docs, get_filename_without_extension
+from ai_math_tutor.utils import format_docs, get_filename_without_extension, parse_page_numbers
 
 GENERATION_LLM = "gemini-2.5-flash"
 QUERY_ANALYSIS_LLM = "gemini-1.5-flash" # use a smaller, weaker model for query analysis
@@ -99,6 +102,7 @@ QUERY_ANALYSIS_TEMPLATE = """You are an expert retrieval strategist for a RAG sy
             - If the question refers to content at the very beginning or end of a page, it is crucial to fetch the `neighboring_pages` (e.g., the previous or next page). 
             Provide the page numbers for the pages (besides that of the current page) needed to answer the user query. 
             ONLY provide page numbers if specific pages are needed to help answer the user query. 
+            - Provide a list of keywords that can be looked up in the book index to find relevant pages to help answer the user question.
             """
 
 # Set up logging
@@ -119,6 +123,7 @@ class State(TypedDict):
     top_k_chunks: int  # number of documents to return
     neighboring_pages: List[int]
     neighboring_pages_content: Optional[str]
+    index_keywords: List[str]
 
 
 class RetrievalPlan(BaseModel):
@@ -137,13 +142,18 @@ class RetrievalPlan(BaseModel):
         "For example, if the user asks about an equation at the top of page 50, "
         "you should include [49] to get the context from the previous page provided page 50 is not the start of a new chapter.",
     )
+    index_keywords: List[str] = Field(
+        default_factory=list,
+        description="A list of keywords that are relevant to the user question"
+    )
 
 
 class RagApplication:
 
-    def __init__(self, collection_name, content_db_path, vector_store=None) -> None:
+    def __init__(self, collection_name, content_db_path, vector_store=None, has_index=False) -> None:
         self.collection_name = collection_name
         self.book_id = collection_name
+        self.has_index = has_index
 
         self.generate_llm = init_chat_model(GENERATION_LLM, model_provider="google_genai", temperature=0)
         self.query_analysis_llm = init_chat_model(QUERY_ANALYSIS_LLM, model_provider="google_genai", temperature=0)
@@ -222,15 +232,15 @@ class RagApplication:
             return {
                 "top_k_chunks": retrieval_plan.top_k_chunks,
                 "neighboring_pages": neighboring_pages,
+                "index_keywords": retrieval_plan.index_keywords
             }
         except Exception as e: # if query analyser fails, set sensible defaults
             logger.error(f"Query analyser failure for {current_page_num} in book {self.book_id}: {e}")
 
             neighboring_pages = [current_page_num - 1] if current_page_num > 1 else []
             return {"top_k_chunks": DEFAULT_K_CHUNKS,
-                    "neighboring_pages": neighboring_pages}
-
-
+                    "neighboring_pages": neighboring_pages,
+                    "index_keywords": []}
 
     def fetch_page(self, state: State):
         """Fetches the clean content for the current book and page from SQLite."""
@@ -304,6 +314,40 @@ class RagApplication:
             return "fetch_page"
         return "analyse_query"
 
+    def fetch_keyword_page_nums(self, state: State):
+        """If there is an index and relevant keywords, return page numbers"""
+        index_keywords = state['index_keywords']
+        neighboring_pages = state['neighboring_pages']
+        index_pages = None
+
+        if not index_keywords:
+            return {"neighboring_pages": neighboring_pages}
+
+        try: # will fail if no index table
+            cursor = self.content_db_conn.cursor()
+            search_query = " OR ".join(f'"{kw}"' for kw in index_keywords)    
+            query = f"""
+            SELECT pages_json FROM book_index_fts
+            WHERE book_id = ? AND term MATCH ?
+            ORDER BY rank
+            LIMIT 5;
+            """
+            params = [self.book_id, search_query]
+            
+            cursor.execute(query, params)
+            results = cursor.fetchall()
+
+            if results:
+                page_strings = [page_str for res in results for page_str in json.loads(res[0])]
+                index_pages = parse_page_numbers(page_strings)
+ 
+            if index_pages:
+                neighboring_pages = list(set(neighboring_pages + index_pages))
+        except Exception as e:
+            logger.warning(f"Skipping index lookup due to error: {e}") # this is going to keep generating the same warning if no index table    
+        return {"neighboring_pages": neighboring_pages}
+
+
     def generate(self, state: State):
         """Generate LLM response to user query"""
         question = state["question"]
@@ -364,6 +408,7 @@ class RagApplication:
         workflow.add_node("retrieve", self.retrieve)
         workflow.add_node("generate", self.generate)
         workflow.add_node("analyse_query", self.analyse_query)
+        workflow.add_node("fetch_keyword_page_nums", self.fetch_keyword_page_nums)
         workflow.add_node("fetch_neighboring_pages", self.fetch_neighboring_pages)
 
         workflow.add_conditional_edges(
@@ -377,7 +422,13 @@ class RagApplication:
         )
         workflow.add_edge("fetch_page", "analyse_query")
         workflow.add_edge("analyse_query", "retrieve")
-        workflow.add_edge("analyse_query", "fetch_neighboring_pages")
+
+        # only add fetch_keyword_page_nums to workflow if an index exists
+        if self.has_index: 
+            workflow.add_edge("analyse_query", "fetch_keyword_page_nums")
+            workflow.add_edge("fetch_keyword_page_nums", "fetch_neighboring_pages")
+        else:
+            workflow.add_edge("analyse_query", "fetch_neighboring_pages")
         workflow.add_edge(["fetch_neighboring_pages", "retrieve"], "generate")  # join
         workflow.add_edge("generate", END)
 
@@ -394,16 +445,33 @@ def end_to_end_pipeline(pdf_path):
     book_id = get_filename_without_extension(pdf_path)
 
     results = asyncio.run(extract_content(pdf_path))  # convert pdf pages to markdown
+
     json_output_file_path = str(PROJECT_ROOT / "data" / f"{book_id}.json")
     store_pages_in_json(results, json_output_file_path)  # store markdown pages in json
+
     documents = load_documents_from_json(json_output_file_path)  # convert json data into Langchain Documents
-    create_or_update_content_database(documents, book_id)  # add pages to sqlite db
+
+    try:
+        create_or_update_content_database(documents, book_id)  # add pages to sqlite db
+    except sqlite3.Error as e:
+        logger.exception(f"Book upload to SQLite failed for '{book_id}': {e}")
+        raise
+    book_index = extract_index(documents) # create book index
+
+    has_index = book_index.index_found
+    if has_index:
+        try:
+            store_index(book_index, book_id, SQLITE_DB_PATH) # store book index
+        except Exception as e:
+            logger.warning(f"Index creation failed: {e}")
+            has_index = False
 
     vector_store = chunk_and_embed_pipeline(documents, collection_name=book_id)  # chunk and embed documents
     rag_app = RagApplication(
         collection_name=book_id,
         content_db_path=SQLITE_DB_PATH,
         vector_store=vector_store,
+        has_index=has_index
     )  # create rag app instance
 
     return rag_app

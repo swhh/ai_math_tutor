@@ -4,3 +4,4 @@ chroma_db/
 poetry.lock
 .env
 __pycache__/
+data
