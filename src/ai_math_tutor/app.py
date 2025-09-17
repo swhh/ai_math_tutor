@@ -10,6 +10,23 @@ import streamlit as st
 from ai_math_tutor.backend import end_to_end_pipeline
 from ai_math_tutor.config import PROJECT_ROOT
 
+def cleanup_upload_artifacts(file_path: str):
+    # remove the uploaded PDF
+    try:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+    except Exception as e:
+        st.warning(f"Couldn't remove uploaded file: {e}")
+
+    # remove the derived JSON produced by the pipeline
+    try:
+        book_id = Path(file_path).stem
+        json_path = PROJECT_ROOT / "data" / f"{book_id}.json"
+        if json_path.exists():
+            json_path.unlink()
+    except Exception as e:
+        st.warning(f"Couldn't remove temporary JSON: {e}")
+
 # --- Page Configuration ---
 st.set_page_config(page_title="AI Mathematics Tutor", page_icon="📖", layout="wide")
 
@@ -28,7 +45,7 @@ if "session_id" not in st.session_state:
     st.session_state.session_id = None
 
 
-# --- Helper Functions for Page Navigation ---
+# Helper Functions
 def next_page():
     if st.session_state.page_num < st.session_state.doc.page_count:
         st.session_state.page_num += 1
@@ -65,9 +82,10 @@ with st.sidebar:
 
                 try:
                     rag_app = end_to_end_pipeline(file_path)
-                except Exception as e: # remember to add code to remove orphaned files
+                except Exception as e: 
                     st.error(f"Failed to process textbook: {e}")
-                    st.stop()  # reset state if error
+                    cleanup_upload_artifacts(file_path) # remove orphaned files
+                    st.stop()  # restart app if pipeline fails
 
                 # Update session state after processing
                 st.session_state.rag_app = rag_app
