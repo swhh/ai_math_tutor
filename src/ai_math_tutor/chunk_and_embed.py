@@ -1,7 +1,7 @@
 import json
 import pathlib
 import sqlite3
-from typing import List
+from typing import List, Optional
 
 from google.genai.errors import ServerError
 from langchain.docstore.document import Document
@@ -10,9 +10,8 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 from langchain.prompts import ChatPromptTemplate
 from langchain.chat_models import init_chat_model
-from pydantic import BaseModel, Field, Optional
+from pydantic import BaseModel, Field
 import torch
-
 
 from ai_math_tutor.config import (
     CHROMA_DB_DIR,
@@ -26,6 +25,7 @@ from ai_math_tutor.config import (
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 INDEX_LLM = "gemini-1.5-flash"
+MAX_LOOKBACK = 50
 
 class IndexEntry(BaseModel):
     """Represents a single term and its associated pages from the book's index."""
@@ -47,13 +47,13 @@ class BookIndex(BaseModel):
     )
 
 
-def create_or_update_content_database(documents: List[Document], book_id: str):
+def create_or_update_content_database(documents: List[Document], book_id: str, db_path=SQLITE_DB_PATH):
     """
     Creates and populates an SQLite database with the full page content,
     tagging each entry with a book_id.
     """
     try:
-        with sqlite3.connect(SQLITE_DB_PATH) as conn:
+        with sqlite3.connect(db_path) as conn:
             cursor = conn.cursor()
 
             cursor.execute(
@@ -108,7 +108,7 @@ def chunk_documents(documents: List[Document]) -> List[Document]:
 
 def extract_index(documents: List[Document]) -> BookIndex:
     total_page_num = len(documents)
-    start_page = int(total_page_num * 0.9)
+    start_page = max(total_page_num - MAX_LOOKBACK, int(total_page_num * 0.9)) # only look at last 50 pages at most
 
     index_text = "\n\n".join(
         f"--- Page {doc.metadata['page_num']} ---\n{doc.page_content}"
