@@ -3,7 +3,7 @@ name = "ai-math-tutor"
 version = "0.1.0"
 description = ""
 authors = [
-    {name = "swhh",email = "seamus.holland1@gmail.com"}
+    {name = "swhh",email = "seamus.holland@icloud.com"}
 ]
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
@@ -20,9 +20,15 @@ dependencies = ["google-genai (>=1.33.0,<2.0.0)",
 "streamlit (>=1.49.1,<2.0.0)"]
 
 
+
 [tool.poetry]
 packages = [{include = "ai_math_tutor", from = "src"}]
 
+[tool.pytest.ini_options]
+pythonpath = "src"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.4.2"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
