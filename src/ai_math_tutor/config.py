@@ -25,7 +25,7 @@ EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 150
 
-
+MISSING_PAGE_PLACEHOLDER = "--- CONTENT MISSING: This page could not be processed owing to a persistent error. ---"
 # Ensure directories exist
 def ensure_directories():
     """Create necessary directories if they don't exist"""

@@ -502,8 +502,6 @@ def main():
     rag_app = end_to_end_pipeline(pdf_path)
     compiled_workflow = rag_app.get_compiled_workflow()
 
-    exit()
-
     chat_history = []
 
     print(

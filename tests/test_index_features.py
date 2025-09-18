@@ -4,11 +4,7 @@ import sqlite3
 
 from langchain.docstore.document import Document
 
-
-
 from ai_math_tutor.chunk_and_embed import store_index, BookIndex, IndexEntry, extract_index
-
-
 
 
 def make_fakes(to_return, holder, to_raise=None):

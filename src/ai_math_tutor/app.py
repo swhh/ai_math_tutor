@@ -8,7 +8,8 @@ import streamlit as st
 from ai_math_tutor.backend import end_to_end_pipeline
 from ai_math_tutor.config import PROJECT_ROOT
 
-def cleanup_upload_artifacts(file_path: str):
+def cleanup_upload_artefacts(file_path: str):
+    """Remove orphaned assets in the event of pipeline failure"""
     # remove the uploaded PDF
     try:
         pdf_path = Path(file_path)
@@ -83,7 +84,7 @@ with st.sidebar:
                     rag_app = end_to_end_pipeline(file_path)
                 except Exception as e: 
                     st.error(f"Failed to process textbook: {e}")
-                    cleanup_upload_artifacts(file_path) # remove orphaned files
+                    cleanup_upload_artefacts(file_path) # remove orphaned files
                     st.stop()  # restart app if pipeline fails
 
                 # Update session state after processing
