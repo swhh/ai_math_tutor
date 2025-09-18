@@ -1,5 +1,3 @@
-# app.py (Stateful Paginator Version)
-import os
 from pathlib import Path
 import uuid
 
@@ -13,8 +11,9 @@ from ai_math_tutor.config import PROJECT_ROOT
 def cleanup_upload_artifacts(file_path: str):
     # remove the uploaded PDF
     try:
-        if os.path.exists(file_path):
-            os.remove(file_path)
+        pdf_path = Path(file_path)
+        if pdf_path.exists():
+            pdf_path.unlink()
     except Exception as e:
         st.warning(f"Couldn't remove uploaded file: {e}")
 
@@ -76,7 +75,7 @@ with st.sidebar:
                 stem = Path(original_name).stem
                 suffix = Path(original_name).suffix.lower()
                 unique_name = f"{stem}__{uuid.uuid4().hex}{suffix}"
-                file_path = os.path.join(str(PROJECT_ROOT), "data", unique_name)
+                file_path = str(PROJECT_ROOT / "data" / unique_name)
                 with open(file_path, "wb") as f:
                     f.write(uploaded_file.getbuffer())
 
