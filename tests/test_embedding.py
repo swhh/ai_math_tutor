@@ -5,7 +5,7 @@ import sqlite3
 
 from langchain.schema.document import Document
 
-
+from ai_math_tutor.config import MISSING_PAGE_PLACEHOLDER
 from ai_math_tutor.chunk_and_embed import create_or_update_content_database,  load_documents_from_json
 
 def test_create_content_database(tmp_path):
@@ -103,3 +103,22 @@ def test_load_documents_from_json_missing_keys(tmp_path: Path):
     with pytest.raises(KeyError):
         load_documents_from_json(str(test_file_path))
 
+
+def test_load_documents_from_json_nonstring_value(tmp_path: Path):
+    """
+    Tests that the function correctly handles null 
+    or other non-string page_content values.
+    """
+    json_content = [
+        {"page_num": 1,
+        "page_content": None,
+        }
+    ]
+    test_file_path = tmp_path / "null_value.json"
+    with open(test_file_path, "w") as f:
+        json.dump(json_content, f)
+
+    print
+    result_documents = load_documents_from_json(str(test_file_path))
+
+    assert result_documents[0].page_content == MISSING_PAGE_PLACEHOLDER
