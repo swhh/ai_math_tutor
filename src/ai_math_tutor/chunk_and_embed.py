@@ -18,6 +18,7 @@ from ai_math_tutor.config import (
     CHUNK_OVERLAP,
     CHUNK_SIZE,
     EMBEDDING_MODEL_NAME,
+    MISSING_PAGE_PLACEHOLDER,
     SAMPLE_BOOK,
     SAMPLE_OUTPUT_FILE_PATH,
     SQLITE_DB_PATH,
@@ -91,7 +92,8 @@ def load_documents_from_json(json_path: str) -> List[Document]:
 
     documents = [
         Document(
-            page_content=page["page_content"], metadata={"page_num": page["page_num"]}
+            page_content=(page.get("page_content") or MISSING_PAGE_PLACEHOLDER), # in case llm returns null
+            metadata={"page_num": page["page_num"]}
         )
         for page in json_data
     ]
@@ -108,7 +110,7 @@ def chunk_documents(documents: List[Document]) -> List[Document]:
 
 def extract_index(documents: List[Document]) -> BookIndex:
     total_page_num = len(documents)
-    start_page = max(total_page_num - MAX_LOOKBACK, int(total_page_num * 0.9)) # only look at last 50 pages at most
+    start_page = max(total_page_num - MAX_LOOKBACK, int(total_page_num * 0.9)) # only look at last MAX_LOOKBACK pages 
 
     index_text = "\n\n".join(
         f"--- Page {doc.metadata['page_num']} ---\n{doc.page_content}"

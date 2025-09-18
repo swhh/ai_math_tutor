@@ -161,7 +161,7 @@ class RagApplication:
         self.content_db_conn = sqlite3.connect(content_db_path, check_same_thread=False)
         # Validate the vector store before using it
         if vector_store is not None:
-            vector_store = self._validate_vector_store()
+            vector_store = self._validate_vector_store(vector_store)
         if vector_store is not None:
             self.vector_store = vector_store
         else:
@@ -257,10 +257,9 @@ class RagApplication:
         return {"current_page_content": content}
 
     def fetch_neighboring_pages(self, state: State):
-
-        neighboring_pages_content = (
-            "No relevant content available for neighboring pages."
-        )
+        """Fetch the markdown content for the neighboring pages from SQLite"""
+        neighboring_pages_content = "No relevant content available for neighboring pages."
+        
         neighboring_pages = state["neighboring_pages"]
         if neighboring_pages:
             cursor = self.content_db_conn.cursor()
@@ -269,11 +268,11 @@ class RagApplication:
 
             cursor.execute(query, params)
             results = cursor.fetchall()
-            results.sort(key=lambda x: x[0])
-
-            neighboring_pages_content = "\n\n".join(
-                f"--- Content from Page {num} ---\n{text}" for num, text in results
-            )
+            if results:
+                results.sort(key=lambda x: x[0])
+                neighboring_pages_content = "\n\n".join(
+                    f"--- Content from Page {num} ---\n{text}" for num, text in results
+                )
 
         return {"neighboring_pages_content": neighboring_pages_content}
 
@@ -304,7 +303,7 @@ class RagApplication:
         }
 
     def route_question(self, state: State):
-        """Route based on current state"""
+        """Route workflow based on current state"""
         has_page = bool(state.get("current_page_content"))
         has_docs = bool(state.get("documents"))
         has_neighbors = bool(state.get("neighboring_pages_content"))
@@ -323,7 +322,7 @@ class RagApplication:
         if not index_keywords:
             return {"neighboring_pages": neighboring_pages}
 
-        try: # will fail if no index table
+        try: 
             cursor = self.content_db_conn.cursor()
             search_query = " OR ".join(f'"{kw}"' for kw in index_keywords)    
             query = f"""
@@ -456,25 +455,34 @@ def end_to_end_pipeline(pdf_path):
     except sqlite3.Error as e:
         logger.exception(f"Book upload to SQLite failed for '{book_id}': {e}")
         raise
-    book_index = extract_index(documents) # create book index
+    book_index = extract_index(documents) # extract book index
 
     has_index = book_index.index_found
-    if has_index:
+    if has_index: # if book index extraction successful
         try:
             store_index(book_index, book_id, SQLITE_DB_PATH) # store book index
         except Exception as e:
             logger.warning(f"Index creation failed: {e}")
             has_index = False
 
-    vector_store = chunk_and_embed_pipeline(documents, collection_name=book_id)  # chunk and embed documents
-    rag_app = RagApplication(
-        collection_name=book_id,
-        content_db_path=SQLITE_DB_PATH,
-        vector_store=vector_store,
-        has_index=has_index
-    )  # create rag app instance
+    vector_store = None
+    try:
+        vector_store = chunk_and_embed_pipeline(documents, collection_name=book_id)  # chunk and embed documents
+        rag_app = RagApplication(
+            collection_name=book_id,
+            content_db_path=SQLITE_DB_PATH,
+            vector_store=vector_store,
+            has_index=has_index
+        )  # create rag app instance
 
-    return rag_app
+        return rag_app
+    except Exception as e: # if ragapp creation process fails, remove chromadb embeddings and metadata
+        try: 
+            if vector_store is not None:
+                vector_store._client.delete_collection(name=book_id)
+        except Exception as cleanup_error:
+            logger.warning(f"Failed to clean up ChromaDB collection {book_id}: {cleanup_error}")
+        raise
 
 
 def main():
@@ -493,6 +501,8 @@ def main():
 
     rag_app = end_to_end_pipeline(pdf_path)
     compiled_workflow = rag_app.get_compiled_workflow()
+
+    exit()
 
     chat_history = []
 

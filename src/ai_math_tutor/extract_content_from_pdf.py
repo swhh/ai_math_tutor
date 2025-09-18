@@ -15,7 +15,7 @@ from tenacity import (
     wait_random_exponential,
 )
 
-from ai_math_tutor.config import PROJECT_ROOT
+from ai_math_tutor.config import PROJECT_ROOT, MISSING_PAGE_PLACEHOLDER 
 
 MODEL_ID = "gemini-2.5-flash"
 GEMINI_PROMPT = """
@@ -30,7 +30,7 @@ Instructions:
 5.  Keep the output clean and focused on the content. Do not add any conversational text.
 """
 
-MISSING_PAGE_PLACEHOLDER = "--- CONTENT MISSING: This page could not be processed owing to a persistent error. ---"
+
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 
@@ -66,7 +66,7 @@ async def async_call_llm(
 
 
 async def extract_content(
-    pdf_path: str, concurrent_requests: int = 10
+    pdf_path: str, concurrent_requests: int = 5
 ) -> List[Dict[str, Any]]:
 
     filepath = pathlib.Path(pdf_path)
