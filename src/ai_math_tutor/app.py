@@ -108,9 +108,9 @@ if st.session_state.processed_file:
         # --- NEW: Paginator Controls ---
         nav_col1, nav_col2, nav_col3 = st.columns([1, 2, 1])
         with nav_col1:
-            st.button("⬅️ Previous", on_click=prev_page, use_container_width=True)
+            st.button("⬅️ Previous", on_click=prev_page, width='stretch')
         with nav_col3:
-            st.button("Next ➡️", on_click=next_page, use_container_width=True)
+            st.button("Next ➡️", on_click=next_page, width='stretch')
         with nav_col2:
             page_input = st.number_input(
                 f"Page (1-{st.session_state.doc.page_count})",
@@ -124,7 +124,7 @@ if st.session_state.processed_file:
         # Display the current page image
         page = st.session_state.doc.load_page(st.session_state.page_num - 1)
         pix = page.get_pixmap(dpi=150)
-        st.image(pix.tobytes("png"), use_container_width=True)
+        st.image(pix.tobytes("png"), width='stretch')
 
     with col2:
         st.header("AI Mathematics Tutor")
@@ -165,7 +165,7 @@ if st.session_state.processed_file:
                 )
                 for output in compiled_workflow.stream(
                     inputs,
-                    {"recursion_limit": 5, "configurable": {"thread_id": thread_id}},
+                    {"configurable": {"thread_id": thread_id}},
                 ):
                     if "generate" in output:
                         response += output["generate"]["generation"]

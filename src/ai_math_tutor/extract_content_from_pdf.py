@@ -6,7 +6,7 @@ from typing import Any, Dict, List
 
 from google import genai
 from google.genai import types
-from google.genai.errors import ServerError
+from google.genai.errors import ClientError, ServerError
 import pymupdf
 from tenacity import (
     retry,
@@ -43,7 +43,7 @@ def _client():
 @retry(
     stop=stop_after_attempt(5),
     wait=wait_random_exponential(multiplier=2, min=2, max=60),
-    retry=retry_if_exception_type(ServerError),
+    retry=retry_if_exception_type((ServerError, ClientError)),
 )
 async def async_call_llm(
     page: pymupdf.Page, page_num: int, client: genai.Client
@@ -66,7 +66,7 @@ async def async_call_llm(
 
 
 async def extract_content(
-    pdf_path: str, concurrent_requests: int = 5
+    pdf_path: str, concurrent_requests: int = 3
 ) -> List[Dict[str, Any]]:
 
     filepath = pathlib.Path(pdf_path)
