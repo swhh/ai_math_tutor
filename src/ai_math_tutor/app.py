@@ -96,6 +96,7 @@ with st.sidebar:
                 st.session_state.session_id = (
                     f"{unique_name}:{uuid.uuid4().hex}"  # start new session
                 )
+                st.session_state.collection_name = original_name # store book name
             st.success("Textbook processed successfully!")
 
 # ---  Main Content Area ---
@@ -155,7 +156,7 @@ if st.session_state.processed_file:
                     "question": prompt,
                     "current_page_num": st.session_state.page_num,
                     "chat_history": current_page_history,
-                    "collection_name": "calculus_textbook.json",  # modify this in future
+                    "collection_name": st.session_state.collection_name,  
                 }
 
                 response = ""
