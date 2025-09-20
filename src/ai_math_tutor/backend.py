@@ -69,7 +69,7 @@ GENERATE_PROMPT_TEMPLATE = """
         ---
 
         Based on all of the above, answer the user's latest question. If the question is a follow-up to the conversation, use the chat history to understand the context. Focus your answer on the CURRENT_PAGE_CONTENT and the user's immediate question.
-        Keep answers brief at all times and reference page numbers where you used information from the background context to formulate your response.
+        Keep answers brief at all times; reference page numbers and cite key passages where you used information from the background context to formulate your response.
 
         LATEST QUESTION: {question}
         ANSWER:
