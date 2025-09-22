@@ -1,0 +1,48 @@
+# .dockerignore
+
+# Ignore Python virtual environments
+.venv
+venv/
+
+# Ignore Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore Git directory
+.git/
+
+# Ignore IDE and OS files
+.idea/
+.vscode/
+.DS_Store
+
+# CRITICAL: Ignore large data and database directories.
+# These are managed by volumes at RUNTIME, they should NOT be part of the build context.
+data/
+chroma_db/
+
+# Ignore build artifacts
+dist/
+build/
+*.egg-info/
+
+tests/
+pytest.ini
+.pytest_cache/
+htmlcov/
+
+Dockerfile
+docker-compose.yml
+
+.DS_Store
+Thumbs.db
+
+README.md
+
+.git/
+.gitignore
+
+.env
+*.env.*

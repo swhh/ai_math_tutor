@@ -1,0 +1,43 @@
+
+services:
+  app-cpu:
+    build:
+      context: .
+      args:
+        PYTORCH_TARGET: cpu
+    image: ai_math_tutor:cpu-latest
+    container_name: ai_math_tutor_cpu_container
+    ports:
+      - "8501:8501"
+    env_file:
+      - ./.env
+    volumes:
+      - .:/app
+      - chroma_db_data:/app/chroma_db
+
+  app-gpu:
+    build:
+      context: .
+      args:
+        PYTORCH_TARGET: cuda
+    image: ai_math_tutor:gpu-latest
+    container_name: ai_math_tutor_gpu_container
+    ports:
+      - "8501:8501"
+    env_file:
+      - ./.env
+    volumes:
+
+      - .:/app
+      
+      - chroma_db_data:/app/chroma_db
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  chroma_db_data:
