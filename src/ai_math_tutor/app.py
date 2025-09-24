@@ -5,8 +5,9 @@ import fitz
 from langchain.schema import HumanMessage, AIMessage
 import streamlit as st
 
-from ai_math_tutor.backend import end_to_end_pipeline
-from ai_math_tutor.config import PROJECT_ROOT
+from ai_math_tutor.backend import AIAnswer, end_to_end_pipeline
+from ai_math_tutor.config import PROJECT_ROOT, STRUCTURED_AI_ANSWERS
+
 
 def cleanup_upload_artefacts(file_path: str):
     """Remove orphaned assets in the event of pipeline failure"""
@@ -26,6 +27,42 @@ def cleanup_upload_artefacts(file_path: str):
             json_path.unlink()
     except Exception as e:
         st.warning(f"Couldn't remove temporary JSON: {e}")
+
+
+def display_response(response: AIAnswer, message_id: int, current_page_num: int):
+    """
+    Displays the AI's response and renders its page references as a responsive,
+    wrapping grid of clickable buttons.
+    """
+    # 1. Display the main response text
+    st.markdown(response.answer)
+
+    # 2. If there are page references, render the button grid
+    if response.page_references:
+        st.markdown("---")  # Visual separator
+        st.caption("Click to navigate to a cited page:")  # Small header for context
+
+        items_per_row = 5
+
+        sorted_references = sorted(list(set(response.page_references)))
+
+        # Process the list in rows
+        for i in range(0, len(sorted_references), items_per_row):
+            row_pages = sorted_references[i : i + items_per_row]
+
+            cols = st.columns(len(row_pages))
+
+            for j, page_num in enumerate(row_pages):
+                with cols[j]:
+                    # The key MUST be unique for every button
+                    st.button(
+                        f"Page {page_num}",
+                        key=f"btn_msg{message_id}_page_ref{page_num}_current_page{current_page_num}",
+                        on_click=go_to_page,
+                        args=(page_num,),
+                        width="stretch",
+                    )
+
 
 # --- Page Configuration ---
 st.set_page_config(page_title="AI Mathematics Tutor", page_icon="📖", layout="wide")
@@ -82,9 +119,12 @@ with st.sidebar:
 
                 try:
                     rag_app = end_to_end_pipeline(file_path)
-                except Exception as e: 
+                    # if rag_app gen succeeds, close the db connection for any existing rag_app
+                    if st.session_state.rag_app:
+                        st.session_state.rag_app.close()
+                except Exception as e:
                     st.error(f"Failed to process textbook: {e}")
-                    cleanup_upload_artefacts(file_path) # remove orphaned files
+                    cleanup_upload_artefacts(file_path)  # remove orphaned files
                     st.stop()  # restart app if pipeline fails
 
                 # Update session state after processing
@@ -96,7 +136,7 @@ with st.sidebar:
                 st.session_state.session_id = (
                     f"{unique_name}:{uuid.uuid4().hex}"  # start new session
                 )
-                st.session_state.collection_name = original_name # store book name
+                st.session_state.collection_name = original_name  # store book name
             st.success("Textbook processed successfully!")
 
 # ---  Main Content Area ---
@@ -105,13 +145,12 @@ if st.session_state.processed_file:
 
     with col1:
         st.header("Textbook Viewer")
-
-        # --- NEW: Paginator Controls ---
+        # --- Paginator Controls ---
         nav_col1, nav_col2, nav_col3 = st.columns([1, 2, 1])
         with nav_col1:
-            st.button("⬅️ Previous", on_click=prev_page, width='stretch')
+            st.button("⬅️ Previous", on_click=prev_page, width="stretch")
         with nav_col3:
-            st.button("Next ➡️", on_click=next_page, width='stretch')
+            st.button("Next ➡️", on_click=next_page, width="stretch")
         with nav_col2:
             page_input = st.number_input(
                 f"Page (1-{st.session_state.doc.page_count})",
@@ -125,7 +164,7 @@ if st.session_state.processed_file:
         # Display the current page image
         page = st.session_state.doc.load_page(st.session_state.page_num - 1)
         pix = page.get_pixmap(dpi=150)
-        st.image(pix.tobytes("png"), width='stretch')
+        st.image(pix.tobytes("png"), width="stretch")
 
     with col2:
         st.header("AI Mathematics Tutor")
@@ -133,10 +172,17 @@ if st.session_state.processed_file:
         current_page_history = st.session_state.page_chats.get(
             st.session_state.page_num, []
         )
-        for message in current_page_history:
+        for i, message in enumerate(current_page_history):
             role = "user" if isinstance(message, HumanMessage) else "assistant"
-            with st.chat_message(role):
-                st.markdown(message.content)
+            if STRUCTURED_AI_ANSWERS and role == "assistant":
+                display_response(
+                    message.additional_kwargs["structured_answer"],
+                    message_id=i,
+                    current_page_num=st.session_state.page_num,
+                )
+            else:
+                with st.chat_message(role):
+                    st.markdown(message.content)
 
         if prompt := st.chat_input(
             f"Ask a question about page {st.session_state.page_num}..."
@@ -150,31 +196,50 @@ if st.session_state.processed_file:
                 st.markdown(prompt)
 
             with st.chat_message("assistant"):
-                message_placeholder = st.empty()
 
                 inputs = {
                     "question": prompt,
                     "current_page_num": st.session_state.page_num,
                     "chat_history": current_page_history,
-                    "collection_name": st.session_state.collection_name,  
+                    "collection_name": st.session_state.collection_name,
                 }
-
-                response = ""
                 compiled_workflow = st.session_state.rag_app.get_compiled_workflow()
                 thread_id = (
                     f"{st.session_state.session_id}:p{st.session_state.page_num}"
                 )
-                for output in compiled_workflow.stream(
-                    inputs,
-                    {"configurable": {"thread_id": thread_id}},
-                ):
-                    if "generate" in output:
-                        response += output["generate"]["generation"]
-                        message_placeholder.markdown(response + "▌")
-                message_placeholder.markdown(response)
+                config = {"configurable": {"thread_id": thread_id}}
+                # if returning structured answers, cannot stream AI responses
+                if STRUCTURED_AI_ANSWERS:
+                    with st.spinner("Thinking..."):
+                        final_state = compiled_workflow.invoke(inputs, config)
+                        response = final_state.get("generation")
+                        if response:
+                            message_id = len(current_page_history)
+                            display_response(
+                                response,
+                                message_id=message_id,
+                                current_page_num=st.session_state.page_num,
+                            )
+                    st.session_state.page_chats[st.session_state.page_num].append(
+                        AIMessage(
+                            content=response.answer,
+                            additional_kwargs={"structured_answer": response},
+                        )
+                    )
+                else:
+                    message_placeholder = st.empty()
+                    response = ""
+                    for output in compiled_workflow.stream(
+                        inputs,
+                        config,
+                    ):
+                        if "generate" in output:
+                            response += output["generate"]["generation"]
+                            message_placeholder.markdown(response + "▌")
+                    message_placeholder.markdown(response)
 
-            st.session_state.page_chats[st.session_state.page_num].append(
-                AIMessage(content=response)
-            )
+                    st.session_state.page_chats[st.session_state.page_num].append(
+                        AIMessage(content=response)
+                    )
 else:
     st.info("Please upload and process a PDF textbook in the sidebar to begin.")

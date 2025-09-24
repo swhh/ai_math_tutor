@@ -15,7 +15,7 @@ from tenacity import (
     wait_random_exponential,
 )
 
-from ai_math_tutor.config import PROJECT_ROOT, MISSING_PAGE_PLACEHOLDER 
+from ai_math_tutor.config import PROJECT_ROOT, MISSING_PAGE_PLACEHOLDER
 
 MODEL_ID = "gemini-2.5-flash"
 GEMINI_PROMPT = """
@@ -74,8 +74,8 @@ async def extract_content(
         raise FileNotFoundError(f"File not found at '{pdf_path}'")
 
     client = _client()
-
-    semaphore = asyncio.Semaphore(concurrent_requests) # limit the number of concurrent requests to avoid throttling
+    # limit the number of concurrent requests to avoid throttling
+    semaphore = asyncio.Semaphore(concurrent_requests)  
 
     async def async_extract_page_content(page, i, client):
         async with semaphore:
@@ -102,9 +102,3 @@ def store_pages_in_json(results, output_file_path):
         json.dump(results, f, ensure_ascii=False, indent=2)
     return output_file_path
 
-
-if __name__ == "__main__":
-    pdf_path = str(PROJECT_ROOT / "data" / "math55a.pdf")
-    json_output_file_path = str(PROJECT_ROOT / "data" / "math55a.json")
-    results = asyncio.run(extract_content(pdf_path))
-    store_pages_in_json(results, json_output_file_path)

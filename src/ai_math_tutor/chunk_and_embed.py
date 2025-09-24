@@ -19,8 +19,6 @@ from ai_math_tutor.config import (
     CHUNK_SIZE,
     EMBEDDING_MODEL_NAME,
     MISSING_PAGE_PLACEHOLDER,
-    SAMPLE_BOOK,
-    SAMPLE_OUTPUT_FILE_PATH,
     SQLITE_DB_PATH,
 )
 
@@ -28,27 +26,38 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 INDEX_LLM = "gemini-1.5-flash"
 MAX_LOOKBACK = 50
 
+
 class IndexEntry(BaseModel):
     """Represents a single term and its associated pages from the book's index."""
-    term: str = Field(..., description="The specific keyword or concept from the index.")
-    pages: List[str] = Field(..., description="A list of page numbers or page ranges (e.g., ['45', '112-115']).")
+
+    term: str = Field(
+        ..., description="The specific keyword or concept from the index."
+    )
+    pages: List[str] = Field(
+        ...,
+        description="A list of page numbers or page ranges (e.g., ['45', '112-115']).",
+    )
+
 
 class BookIndex(BaseModel):
     """
     The full, parsed index of the book. Includes a flag to indicate
     if an index was successfully found and parsed.
     """
+
     index_found: bool = Field(
         ...,
-        description="Set to true if the provided text is a book index and was parsed successfully, otherwise set to false."
+        description="Set to true if the provided text is a book index and was parsed successfully, otherwise set to false.",
     )
     entries: Optional[List[IndexEntry]] = Field(
         default=None,
-        description="The list of parsed index entries. This should be null if index_found is false."
+        description="The list of parsed index entries. This should be null if index_found is false.",
     )
 
 
-def create_or_update_content_database(documents: List[Document], book_id: str, db_path=SQLITE_DB_PATH):
+def create_or_update_content_database(
+    documents: List[Document], book_id: str, db_path=SQLITE_DB_PATH
+):
     """
     Creates and populates an SQLite database with the full page content,
     tagging each entry with a book_id.
@@ -92,8 +101,10 @@ def load_documents_from_json(json_path: str) -> List[Document]:
 
     documents = [
         Document(
-            page_content=(page.get("page_content") or MISSING_PAGE_PLACEHOLDER), # in case llm returns null
-            metadata={"page_num": page["page_num"]}
+            page_content=(
+                page.get("page_content") or MISSING_PAGE_PLACEHOLDER
+            ),  # in case llm returns null
+            metadata={"page_num": page["page_num"]},
         )
         for page in json_data
     ]
@@ -110,71 +121,92 @@ def chunk_documents(documents: List[Document]) -> List[Document]:
 
 def extract_index(documents: List[Document]) -> BookIndex:
     total_page_num = len(documents)
-    start_page = max(total_page_num - MAX_LOOKBACK, int(total_page_num * 0.9)) # only look at last MAX_LOOKBACK pages 
+    start_page = max(
+        total_page_num - MAX_LOOKBACK, int(total_page_num * 0.9)
+    )  # only look at last MAX_LOOKBACK pages
 
     index_text = "\n\n".join(
         f"--- Page {doc.metadata['page_num']} ---\n{doc.page_content}"
-        for doc in documents if doc.metadata['page_num'] >= start_page
+        for doc in documents
+        if doc.metadata["page_num"] >= start_page
     )
     index_llm = init_chat_model(INDEX_LLM, model_provider="google_genai", temperature=0)
     structured_llm = index_llm.with_structured_output(BookIndex)
 
-    prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are an expert document parser. Your task is to extract the keyword index from the provided text.
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                """You are an expert document parser. Your task is to extract the keyword index from the provided text.
             - If the text clearly appears to be a book index, parse it into a list of terms and their associated page numbers. Set `index_found` to true.
-            - If the text does NOT appear to be a book index, or if you are unable to parse it, you MUST set `index_found` to false and leave the `entries` field null."""),
-            ("human", "Please parse the book index from the following text:\n\n{index_text}")
-        ])
-    
+            - If the text does NOT appear to be a book index, or if you are unable to parse it, you MUST set `index_found` to false and leave the `entries` field null.""",
+            ),
+            (
+                "human",
+                "Please parse the book index from the following text:\n\n{index_text}",
+            ),
+        ]
+    )
+
     chain = prompt | structured_llm.with_retry(
-            retry_if_exception_type=(ServerError,),
-            wait_exponential_jitter=True,
-            stop_after_attempt=3,
+        retry_if_exception_type=(ServerError,),
+        wait_exponential_jitter=True,
+        stop_after_attempt=3,
     )
     try:
         book_index = chain.invoke({"index_text": index_text})
         return book_index
     except Exception as e:
-        print(f'Book indexing failed: {e}')
+        print(f"Book indexing failed: {e}")
     return BookIndex(index_found=False, entries=None)
 
 
-def store_index(book_index: BookIndex, book_id: str, content_db_path:str = SQLITE_DB_PATH):
-    try:  
+def store_index(
+    book_index: BookIndex, book_id: str, content_db_path: str = SQLITE_DB_PATH
+):
+    try:
         with sqlite3.connect(content_db_path) as conn:
-                cursor = conn.cursor()
-                
-                # --- Create an FTS5 Virtual Table ---
-                cursor.execute("""
+            cursor = conn.cursor()
+
+            # --- Create an FTS5 Virtual Table ---
+            cursor.execute(
+                """
                 CREATE VIRTUAL TABLE IF NOT EXISTS book_index_fts
                 USING fts5(term, pages_json, book_id UNINDEXED, tokenize = 'porter');
-                """)
-                
-                # --- Create book index table ---
-                cursor.execute("""
+                """
+            )
+
+            # --- Create book index table ---
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS book_index (
                     book_id TEXT NOT NULL,
                     term TEXT NOT NULL,
                     pages_json TEXT NOT NULL,
                     PRIMARY KEY (book_id, term)
                 )
-                """)
-                
-                index_data = [
-                (book_id, entry.term.lower(), json.dumps(entry.pages)) 
+                """
+            )
+
+            index_data = [
+                (book_id, entry.term.lower(), json.dumps(entry.pages))
                 for entry in book_index.entries
-            ]    
-                cursor.executemany("INSERT OR REPLACE INTO book_index VALUES (?, ?, ?)", index_data)
-                
-                # Populate the FTS table from the main table deleting existing entries for the book to prevent duplicates.
-                cursor.execute("DELETE FROM book_index_fts WHERE book_id = ?", (book_id,))
-                cursor.execute("""
+            ]
+            cursor.executemany(
+                "INSERT OR REPLACE INTO book_index VALUES (?, ?, ?)", index_data
+            )
+
+            # Populate the FTS table from the main table deleting existing entries for the book to prevent duplicates.
+            cursor.execute("DELETE FROM book_index_fts WHERE book_id = ?", (book_id,))
+            cursor.execute(
+                """
                 INSERT INTO book_index_fts (term, pages_json, book_id)
                 SELECT term, pages_json, book_id FROM book_index WHERE book_id = ?
-                """, (book_id,))            
+                """,
+                (book_id,),
+            )
     except Exception as e:
         raise e
-
 
 
 def chunk_and_embed_pipeline(documents, collection_name):
@@ -196,18 +228,3 @@ def chunk_and_embed_pipeline(documents, collection_name):
         collection_name=collection_name,
     )
     return vector_store
-
-
-if __name__ == "__main__":
-    emb = HuggingFaceEmbeddings(
-        model_name=EMBEDDING_MODEL_NAME, model_kwargs={"device": DEVICE}
-    )
-    vs = Chroma(
-        persist_directory=CHROMA_DB_DIR,
-        embedding_function=emb,
-        collection_name=SAMPLE_BOOK,
-    )
-
-    documents = load_documents_from_json(SAMPLE_OUTPUT_FILE_PATH)
-    print("collections:", [c.name for c in vs._client.list_collections()])
-    print("count:", vs._collection.count())

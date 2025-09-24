@@ -14,18 +14,17 @@ CHROMA_DB_DIR = PROJECT_ROOT / "chroma_db"
 # Database paths
 SQLITE_DB_PATH = DATA_DIR / "book_content.db"
 
-# Sample data
-SAMPLE_BOOK = "tao_complex_analysis_vol_two"
-
-# File paths
-SAMPLE_OUTPUT_FILE_PATH = DATA_DIR / f"{SAMPLE_BOOK}.json"
-
 # Model configuration
 EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 150
 
 MISSING_PAGE_PLACEHOLDER = "--- CONTENT MISSING: This page could not be processed owing to a persistent error. ---"
+
+# whether the AI assistant should return structured responses with AIAnswer or not
+STRUCTURED_AI_ANSWERS = True
+
+
 # Ensure directories exist
 def ensure_directories():
     """Create necessary directories if they don't exist"""
