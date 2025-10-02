@@ -6,7 +6,7 @@ import sqlite3
 from langchain.schema.document import Document
 
 from ai_math_tutor.config import MISSING_PAGE_PLACEHOLDER
-from ai_math_tutor.chunk_and_embed import create_or_update_content_database,  load_documents_from_json
+from ai_math_tutor.chunk_and_embed import create_or_update_sqlite_content_database,  load_documents_from_json
 
 def test_create_content_database(tmp_path):
     """Tests that the SQLite DB is created and populated correctly."""
@@ -17,7 +17,7 @@ def test_create_content_database(tmp_path):
     docs = [Document(page_content=f"Page {num} content", metadata={"page_num": num}) for num in range(1, 4)]
     book_id = "test_book"
 
-    create_or_update_content_database(docs, book_id, db_path=str(test_db_path))
+    create_or_update_sqlite_content_database(docs, book_id, db_path=str(test_db_path))
 
     # Check that the database file was actually created
     assert test_db_path.exists()

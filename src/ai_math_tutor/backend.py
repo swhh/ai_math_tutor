@@ -1,3 +1,4 @@
+from abc import ABC, abstractmethod
 import asyncio
 import json
 import logging
@@ -15,10 +16,13 @@ from langchain.schema.document import Document
 from langchain.schema import BaseMessage, HumanMessage, AIMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import START, StateGraph, END
+from langchain.vectorstores.base import VectorStore 
 from pydantic import BaseModel, Field
+from sqlalchemy import func
+from sqlmodel import select, Session
 
 from ai_math_tutor.chunk_and_embed import (
-    create_or_update_content_database,
+    create_or_update_sqlite_content_database,
     DEVICE,
     load_documents_from_json,
     chunk_and_embed_pipeline,
@@ -42,6 +46,8 @@ from ai_math_tutor.utils import (
     get_filename_without_extension,
     parse_page_numbers,
 )
+
+from ai_math_tutor.database.models import BookIndex, PageContent
 
 GENERATION_LLM = "gemini-2.5-flash"
 # use a smaller, weaker model for query analysis
@@ -145,6 +151,7 @@ class State(TypedDict):
     neighboring_pages: List[int]
     neighboring_pages_content: Optional[str]
     index_keywords: List[str]
+    book_id: Optional[int]
 
 
 class RetrievalPlan(BaseModel):
@@ -169,74 +176,24 @@ class RetrievalPlan(BaseModel):
     )
 
 
-class RagApplication:
-
-    def __init__(
-        self, collection_name, content_db_path, vector_store=None, has_index=False
-    ) -> None:
-        self.collection_name = collection_name
+class BaseRagApplication(ABC):
+    """
+    An abstract base class defining the interface for a RAG application.
+    It contains the shared logic and enforces a contract for data-fetching methods.
+    """
+    def __init__(self, collection_name: str, vector_store: VectorStore, has_index=False):
         self.book_id = collection_name
         self.has_index = has_index
+        self.vector_store = vector_store
 
         self.generate_llm = init_chat_model(
-            GENERATION_LLM, model_provider="google_genai", temperature=0
+            GENERATION_LLM, model_provider="google_genai", temperature=0.1
         )
         self.query_analysis_llm = init_chat_model(
             QUERY_ANALYSIS_LLM, model_provider="google_genai", temperature=0
         )
 
-        self.content_db_conn = sqlite3.connect(content_db_path, check_same_thread=False)
-        # Validate the vector store before using it
-        if vector_store is not None:
-            vector_store = self._validate_vector_store(vector_store)
-        if vector_store is not None:
-            self.vector_store = vector_store
-        else:
-            logger.info(f"Creating new vector store")
-            embedding_model = HuggingFaceEmbeddings(
-                model_name=EMBEDDING_MODEL_NAME, model_kwargs={"device": DEVICE}
-            )
-            self.vector_store = Chroma(
-                persist_directory=CHROMA_DB_DIR,
-                embedding_function=embedding_model,
-                collection_name=self.collection_name,
-            )
-
         self.compiled_workflow = self._generate_workflow()
-
-    def close(self):
-        """Close database connection"""
-        if hasattr(self, "content_db_conn"):
-            self.content_db_conn.close()
-
-    def _format_chat_history(self, chat_history: List[BaseMessage]) -> str:
-        """Formats the chat history into a readable string for the prompt."""
-        if not chat_history:
-            return "No previous conversation history."
-        return "\n".join(
-            f"{'User' if isinstance(msg, HumanMessage) else 'Tutor'}: {msg.content}"
-            for msg in chat_history
-        )
-
-    def _validate_vector_store(self, vector_store):
-        """Validate vector store"""
-        try:
-            doc_count = vector_store._collection.count()
-            if doc_count == 0:
-                logger.warning(
-                    f"Warning: Collection '{self.collection_name}' is empty, creating new vector store..."
-                )
-                vector_store = None  # Force creation of new vector store
-            else:
-                logger.warning(
-                    f"Collection '{self.collection_name}' validated with {doc_count} documents"
-                )
-        except Exception as e:
-            logger.warning(
-                f"Warning: Could not validate collection '{self.collection_name}': {e}"
-            )
-            vector_store = None  # Force creation of new vector store
-        return vector_store
 
     def analyse_query(self, state: State):
         question = state["question"]
@@ -281,41 +238,14 @@ class RagApplication:
                 "index_keywords": [],
             }
 
-    def fetch_page(self, state: State):
-        """Fetches the clean content for the current book and page from SQLite."""
-        current_page_num = state["current_page_num"]
-        cursor = self.content_db_conn.cursor()
-
-        cursor.execute(
-            "SELECT content FROM pages WHERE book_id = ? AND page_number = ?",
-            (self.book_id, current_page_num),
+    def _format_chat_history(self, chat_history: List[BaseMessage]) -> str:
+        """Formats the chat history into a readable string for the prompt."""
+        if not chat_history:
+            return "No previous conversation history."
+        return "\n".join(
+            f"{'User' if isinstance(msg, HumanMessage) else 'Tutor'}: {msg.content}"
+            for msg in chat_history
         )
-        result = cursor.fetchone()
-
-        content = result[0] if result else "No content found for this page."
-        return {"current_page_content": content}
-
-    def fetch_neighboring_pages(self, state: State):
-        """Fetch the markdown content for the neighboring pages from SQLite"""
-        neighboring_pages_content = (
-            "No relevant content available for neighboring pages."
-        )
-
-        neighboring_pages = state["neighboring_pages"]
-        if neighboring_pages:
-            cursor = self.content_db_conn.cursor()
-            query = f"SELECT page_number, content FROM pages WHERE book_id = ? AND page_number IN ({','.join('?' for _ in neighboring_pages)})"
-            params = [self.book_id] + neighboring_pages
-
-            cursor.execute(query, params)
-            results = cursor.fetchall()
-            if results:
-                results.sort(key=lambda x: x[0])
-                neighboring_pages_content = "\n\n".join(
-                    f"--- Content from Page {num} ---\n{text}" for num, text in results
-                )
-
-        return {"neighboring_pages_content": neighboring_pages_content}
 
     def retrieve(self, state: State):
         """Fetch relevant docs from vector db"""
@@ -353,41 +283,6 @@ class RagApplication:
         if not has_page:
             return "fetch_page"
         return "analyse_query"
-
-    def fetch_keyword_page_nums(self, state: State):
-        """If there is an index and relevant keywords, return page numbers"""
-        index_keywords = state["index_keywords"]
-        neighboring_pages = state["neighboring_pages"]
-        index_pages = None
-
-        if not index_keywords:
-            return {"neighboring_pages": neighboring_pages}
-
-        try:
-            cursor = self.content_db_conn.cursor()
-            search_query = " OR ".join(f'"{kw}"' for kw in index_keywords)
-            query = f"""
-            SELECT pages_json FROM book_index_fts
-            WHERE book_id = ? AND term MATCH ?
-            ORDER BY rank
-            LIMIT 5;
-            """
-            params = [self.book_id, search_query]
-
-            cursor.execute(query, params)
-            results = cursor.fetchall()
-
-            if results:
-                page_strings = [
-                    page_str for res in results for page_str in json.loads(res[0])
-                ]
-                index_pages = parse_page_numbers(page_strings)
-
-            if index_pages:
-                neighboring_pages = list(set(neighboring_pages + index_pages))
-        except Exception as e:
-            logger.warning(f"Skipping index lookup due to error: {e}")  
-        return {"neighboring_pages": neighboring_pages}
 
     def generate(self, state: State):
         """Generate LLM response to user query"""
@@ -454,6 +349,21 @@ class RagApplication:
                 return {"generation": AIAnswer(answer=fallback, page_references=[])}
             return {"generation": fallback}
 
+    @abstractmethod
+    def fetch_page(self, state: State, **kwargs):
+        """Fetch the current page"""
+        pass
+
+    @abstractmethod
+    def fetch_neighboring_pages(self, state: State, **kwargs):
+        """Fetch neighboring pages"""
+        pass
+
+    @abstractmethod
+    def fetch_keyword_page_nums(self, state: State, **kwargs):
+        """Fetch page nums for keywords"""
+        pass
+
     def _generate_workflow(self):
         """Generate workflow to be compiled"""
         workflow = StateGraph(State)
@@ -497,6 +407,216 @@ class RagApplication:
         return self.compiled_workflow
 
 
+class ProductionRagApplication(BaseRagApplication):
+    """A stateless RAG application that uses PostgreSQL and a production-grade vector store"""
+    def __init__(
+        self, collection_name, embedding_model, has_index=False
+    ) -> None:
+
+        vector_store = Chroma(
+                persist_directory=CHROMA_DB_DIR,
+                embedding_function=embedding_model,
+                collection_name=collection_name,
+            )
+        super().__init__(self, collection_name, vector_store, has_index=has_index)
+
+    def _get_session_from_config(self, config: dict) -> Session:
+        """Helper function to extract the db_session from the config dict passed by LangGraph"""
+        db_session = config.get("configurable", {}).get("db_session")
+        if not db_session:
+            raise ValueError("Database session not found in graph config.")
+        return db_session
+
+    def fetch_page(self, state: State, config: dict, **kwargs):
+        """Fetch the current page"""
+        current_page_num = state["current_page_num"]
+        book_id = state["book_id"]
+
+        db_session = self._get_session_from_config(config)
+        page_content = db_session.exec(select(PageContent).where(PageContent.book_id == book_id,
+                                                                 PageContent.page_number == current_page_num )).first()
+        return {"current_page_content": page_content.content}
+
+    def fetch_neighboring_pages(self, state: State, config: dict, **kwargs):
+        """Fetch neighboring pages"""
+        neighboring_pages_content = "No relevant content available for neighboring pages."
+        neighboring_pages = state["neighboring_pages"]
+        book_id = state["book_id"]
+
+        if neighboring_pages:
+            db_session = self._get_session_from_config(config)
+            statement = select(PageContent).where(PageContent.book_id == book_id).where(
+                                                 PageContent.page_number.in_(neighboring_pages)).order_by(PageContent.page_number)
+            results = db_session.exec(statement).all()
+            if results:
+                neighboring_pages_content = "\n\n".join(
+                    f"--- Content from Page {num} ---\n{text}" for num, text in results
+                )
+
+        return {"neighboring_pages_content": neighboring_pages_content}
+
+    def fetch_keyword_page_nums(self, state: State, config: dict, **kwargs):
+        """Fetch page nums for keywords"""
+        index_keywords = state["index_keywords"]
+        neighboring_pages = state["neighboring_pages"]
+        book_id = state["book_id"]
+        if not index_keywords:
+            return {"neighboring_pages": neighboring_pages}
+        
+        neighboring_pages = state["neighboring_pages"]
+        index_pages = None
+
+        db_session = self._get_session_from_config(config)
+
+        statement = select(BookIndex).where(BookIndex.book_id == book_id).where()
+        search_query_str = " | ".join(index_keywords)
+        search_query = func.to_tsquery('english', search_query_str)
+            
+        statement = (select(BookIndex)
+                .where(BookIndex.book_id == state["book_id"])
+                .where(
+                    BookIndex.__ts_vector__.match(
+                        search_query, postgresql_regconfig='english'
+                    )
+                )
+                .order_by(
+                    func.ts_rank(BookIndex.__ts_vector__, search_query).desc()
+                )
+                .limit(10)) # Limit to the top 10 most relevant terms.
+        
+        results = db_session.exec(statement).all()
+        if results:
+            page_strings = [page_str for res in results for page_str in res.pages_json]
+            index_pages = parse_page_numbers(page_strings)
+            if index_pages:
+                neighboring_pages = list(set(neighboring_pages + index_pages))   
+
+        return {"neighboring_pages": neighboring_pages}
+
+
+class DemoRagApplication(BaseRagApplication):
+    """A demo stateful RAG app that uses SQLite and local ChromaDB vector store"""
+    def __init__(
+        self, collection_name, content_db_path, vector_store=None, has_index=False
+    ) -> None:
+
+        super().__init__(self, collection_name, vector_store, has_index=has_index)
+
+        self.content_db_conn = sqlite3.connect(content_db_path, check_same_thread=False)
+        # Validate the vector store before using it
+        if vector_store is not None:
+            vector_store = self._validate_vector_store(vector_store)
+        if vector_store is not None:
+            self.vector_store = vector_store
+        else:
+            logger.info(f"Creating new vector store")
+            embedding_model = HuggingFaceEmbeddings(
+                model_name=EMBEDDING_MODEL_NAME, model_kwargs={"device": DEVICE}
+            )
+            self.vector_store = Chroma(
+                persist_directory=CHROMA_DB_DIR,
+                embedding_function=embedding_model,
+                collection_name=collection_name,
+            )
+
+    def close(self):
+        """Close database connection"""
+        if hasattr(self, "content_db_conn"):
+            self.content_db_conn.close()
+
+
+    def _validate_vector_store(self, vector_store):
+        """Validate vector store"""
+        try:
+            doc_count = vector_store._collection.count()
+            if doc_count == 0:
+                logger.warning(
+                    f"Warning: Collection '{self.book_id}' is empty, creating new vector store..."
+                )
+                vector_store = None  # Force creation of new vector store
+            else:
+                logger.warning(
+                    f"Collection '{self.book_id}' validated with {doc_count} documents"
+                )
+        except Exception as e:
+            logger.warning(
+                f"Warning: Could not validate collection '{self.book_id}': {e}"
+            )
+            vector_store = None  # Force creation of new vector store
+        return vector_store
+
+    def fetch_page(self, state: State, **kwargs):
+        """Fetches the clean content for the current book and page from SQLite."""
+        current_page_num = state["current_page_num"]
+        cursor = self.content_db_conn.cursor()
+
+        cursor.execute(
+            "SELECT content FROM pages WHERE book_id = ? AND page_number = ?",
+            (self.book_id, current_page_num),
+        )
+        result = cursor.fetchone()
+
+        content = result[0] if result else "No content found for this page."
+        return {"current_page_content": content}
+
+    def fetch_neighboring_pages(self, state: State, **kwargs):
+        """Fetch the markdown content for the neighboring pages from SQLite"""
+        neighboring_pages_content = (
+            "No relevant content available for neighboring pages."
+        )
+
+        neighboring_pages = state["neighboring_pages"]
+        if neighboring_pages:
+            cursor = self.content_db_conn.cursor()
+            query = f"SELECT page_number, content FROM pages WHERE book_id = ? AND page_number IN ({','.join('?' for _ in neighboring_pages)})"
+            params = [self.book_id] + neighboring_pages
+
+            cursor.execute(query, params)
+            results = cursor.fetchall()
+            if results:
+                results.sort(key=lambda x: x[0])
+                neighboring_pages_content = "\n\n".join(
+                    f"--- Content from Page {num} ---\n{text}" for num, text in results
+                )
+
+        return {"neighboring_pages_content": neighboring_pages_content}
+
+    def fetch_keyword_page_nums(self, state: State, **kwargs):
+        """If there is an index and relevant keywords, return page numbers"""
+        index_keywords = state["index_keywords"]
+        neighboring_pages = state["neighboring_pages"]
+        index_pages = None
+
+        if not index_keywords:
+            return {"neighboring_pages": neighboring_pages}
+
+        try:
+            cursor = self.content_db_conn.cursor()
+            search_query = " OR ".join(f'"{kw}"' for kw in index_keywords)
+            query = f"""
+            SELECT pages_json FROM book_index_fts
+            WHERE book_id = ? AND term MATCH ?
+            ORDER BY rank
+            LIMIT 5;
+            """
+            params = [self.book_id, search_query]
+
+            cursor.execute(query, params)
+            results = cursor.fetchall()
+
+            if results:
+                page_strings = [
+                    page_str for res in results for page_str in json.loads(res[0])
+                ]
+                index_pages = parse_page_numbers(page_strings)
+
+            if index_pages:
+                neighboring_pages = list(set(neighboring_pages + index_pages))
+        except Exception as e:
+            logger.warning(f"Skipping index lookup due to error: {e}")  
+        return {"neighboring_pages": neighboring_pages}
+
+
 def end_to_end_pipeline(pdf_path):
     """Generate rag app instance from textbook pdf file path"""
     book_id = get_filename_without_extension(pdf_path)
@@ -510,7 +630,7 @@ def end_to_end_pipeline(pdf_path):
     documents = load_documents_from_json(json_output_file_path)  
 
     try:
-        create_or_update_content_database(documents, book_id)  # add pages to sqlite db
+        create_or_update_sqlite_content_database(documents, book_id)  # add pages to sqlite db
     except sqlite3.Error as e:
         logger.exception(f"Book upload to SQLite failed for '{book_id}': {e}")
         raise
@@ -528,7 +648,7 @@ def end_to_end_pipeline(pdf_path):
     try:
         # chunk and embed documents
         vector_store = chunk_and_embed_pipeline(documents, collection_name=book_id)  
-        rag_app = RagApplication(
+        rag_app = DemoRagApplication(
             collection_name=book_id,
             content_db_path=SQLITE_DB_PATH,
             vector_store=vector_store,

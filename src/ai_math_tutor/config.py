@@ -22,7 +22,7 @@ CHUNK_OVERLAP = 150
 MISSING_PAGE_PLACEHOLDER = "--- CONTENT MISSING: This page could not be processed owing to a persistent error. ---"
 
 # whether the AI assistant should return structured responses with AIAnswer or not
-STRUCTURED_AI_ANSWERS = True
+STRUCTURED_AI_ANSWERS = False
 
 
 # Ensure directories exist

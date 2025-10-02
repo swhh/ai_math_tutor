@@ -17,10 +17,10 @@ from ai_math_tutor.config import (
     CHROMA_DB_DIR,
     CHUNK_OVERLAP,
     CHUNK_SIZE,
-    EMBEDDING_MODEL_NAME,
     MISSING_PAGE_PLACEHOLDER,
     SQLITE_DB_PATH,
 )
+from ai_math_tutor.embeddings import get_embedding_model
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 INDEX_LLM = "gemini-1.5-flash"
@@ -55,7 +55,7 @@ class BookIndex(BaseModel):
     )
 
 
-def create_or_update_content_database(
+def create_or_update_sqlite_content_database(
     documents: List[Document], book_id: str, db_path=SQLITE_DB_PATH
 ):
     """
@@ -89,7 +89,6 @@ def create_or_update_content_database(
 
     except sqlite3.Error as e:
         raise e
-
 
 def load_documents_from_json(json_path: str) -> List[Document]:
 
@@ -213,13 +212,7 @@ def chunk_and_embed_pipeline(documents, collection_name):
 
     chunks = chunk_documents(documents)
 
-    model_kwargs = {"device": DEVICE}
-    encode_kwargs = {"normalize_embeddings": False}
-    hf_embedding = HuggingFaceEmbeddings(
-        model_name=EMBEDDING_MODEL_NAME,
-        model_kwargs=model_kwargs,
-        encode_kwargs=encode_kwargs,
-    )
+    hf_embedding = get_embedding_model()
 
     vector_store = Chroma.from_documents(
         documents=chunks,

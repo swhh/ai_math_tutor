@@ -1,7 +1,12 @@
+import aiofiles
 import os
+from pathlib import Path
 from typing import List
+import uuid
 
+from fastapi import UploadFile
 from langchain.schema.document import Document
+
 
 
 def format_docs(docs: List[Document]) -> str:
@@ -38,3 +43,23 @@ def parse_page_numbers(pages: List[str]) -> List[int]:
             except ValueError:
                 continue  # Skip non-integer page numbers
     return sorted(list(all_pages))
+
+
+async def save_upload_file_async(upload_file: UploadFile, destination: Path) -> None:
+    """
+    Asynchronously saves an uploaded file to a destination path.
+    """
+    try:
+        async with aiofiles.open(destination, 'wb') as out_file:
+            while content := await upload_file.read(1024 * 1024):  # Read in 1MB chunks
+                await out_file.write(content)
+    finally:
+        await upload_file.close()
+
+
+def generate_collection_name(filename):
+    original_name = Path(filename).name
+    title = Path(original_name).stem
+    suffix = Path(original_name).suffix.lower()
+    collection_name = f"{title}__{uuid.uuid4().hex}{suffix}"
+    return collection_name
